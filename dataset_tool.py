@@ -270,8 +270,8 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
 @click.group()
 def cmdline():
     '''Dataset processing tool for dataset image data conversion and VAE encode/decode preprocessing.'''
-    if os.environ.get('WORLD_SIZE', '1') != '1':
-        raise click.ClickException('Distributed execution is not supported.')
+    # if os.environ.get('WORLD_SIZE', '1') != '1':
+    #     raise click.ClickException('Distributed execution is not supported.')
 
 # ----------------------------------------------------------------------------
 
