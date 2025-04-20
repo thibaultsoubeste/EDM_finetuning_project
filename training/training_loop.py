@@ -20,9 +20,10 @@ from torch_utils import training_stats
 from torch_utils import persistence
 from torch_utils import misc
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Uncertainty-based loss function (Equations 14,15,16,21) proposed in the
 # paper "Analyzing and Improving the Training Dynamics of Diffusion Models".
+
 
 @persistence.persistent_class
 class EDM2Loss:
@@ -40,11 +41,12 @@ class EDM2Loss:
         loss = (weight / logvar.exp()) * ((denoised - images) ** 2) + logvar
         return loss
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Learning rate decay schedule used in the paper "Analyzing and Improving
 # the Training Dynamics of Diffusion Models".
 
-def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_Mimg=10):
+
+def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3, rampup_Mimg=0):
     lr = ref_lr
     if ref_batches > 0:
         lr /= np.sqrt(max(cur_nimg / (ref_batches * batch_size), 1))
@@ -52,33 +54,35 @@ def learning_rate_schedule(cur_nimg, batch_size, ref_lr=100e-4, ref_batches=70e3
         lr *= min(cur_nimg / (rampup_Mimg * 1e6), 1)
     return lr
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Main training loop.
 
+
 def training_loop(
-    dataset_kwargs      = dict(class_name='training.dataset.ImageFolderDataset', path=None),
-    encoder_kwargs      = dict(class_name='training.encoders.StabilityVAEEncoder'),
-    data_loader_kwargs  = dict(class_name='torch.utils.data.DataLoader', pin_memory=True, num_workers=2, prefetch_factor=2),
-    network_kwargs      = dict(class_name='training.networks_edm2.Precond'),
-    loss_kwargs         = dict(class_name='training.training_loop.EDM2Loss'),
-    optimizer_kwargs    = dict(class_name='torch.optim.Adam', betas=(0.9, 0.99)),
-    lr_kwargs           = dict(func_name='training.training_loop.learning_rate_schedule'),
-    ema_kwargs          = dict(class_name='training.phema.PowerFunctionEMA'),
+    dataset_kwargs=dict(class_name='training.dataset.ImageFolderDataset', path=None),
+    encoder_kwargs=dict(class_name='training.encoders.StabilityVAEEncoder'),
+    data_loader_kwargs=dict(class_name='torch.utils.data.DataLoader', pin_memory=True, num_workers=2, prefetch_factor=2),
+    network_kwargs=dict(class_name='training.networks_edm2.Precond'),
+    loss_kwargs=dict(class_name='training.training_loop.EDM2Loss'),
+    optimizer_kwargs=dict(class_name='torch.optim.Adam', betas=(0.9, 0.99)),
+    lr_kwargs=dict(func_name='training.training_loop.learning_rate_schedule'),
+    ema_kwargs=dict(class_name='training.phema.PowerFunctionEMA'),
 
-    run_dir             = '.',      # Output directory.
-    seed                = 0,        # Global random seed.
-    batch_size          = 2048,     # Total batch size for one training iteration.
-    batch_gpu           = None,     # Limit batch size per GPU. None = no limit.
-    total_nimg          = 8<<30,    # Train for a total of N training images.
-    slice_nimg          = None,     # Train for a maximum of N training images in one invocation. None = no limit.
-    status_nimg         = 128<<10,  # Report status every N training images. None = disable.
-    snapshot_nimg       = 8<<20,    # Save network snapshot every N training images. None = disable.
-    checkpoint_nimg     = 128<<20,  # Save state checkpoint every N training images. None = disable.
+    run_dir='.',      # Output directory.
+    preload_model=None,
+    seed=0,        # Global random seed.
+    batch_size=2048,     # Total batch size for one training iteration.
+    batch_gpu=None,     # Limit batch size per GPU. None = no limit.
+    total_nimg=8 << 30,    # Train for a total of N training images.
+    slice_nimg=None,     # Train for a maximum of N training images in one invocation. None = no limit.
+    status_nimg=128 << 10,  # Report status every N training images. None = disable.
+    snapshot_nimg=8 << 20,    # Save network snapshot every N training images. None = disable.
+    checkpoint_nimg=128 << 20,  # Save state checkpoint every N training images. None = disable.
 
-    loss_scaling        = 1,        # Loss scaling factor for reducing FP16 under/overflows.
-    force_finite        = True,     # Get rid of NaN/Inf gradients before feeding them to the optimizer.
-    cudnn_benchmark     = True,     # Enable torch.backends.cudnn.benchmark?
-    device              = torch.device('cuda'),
+    loss_scaling=1,        # Loss scaling factor for reducing FP16 under/overflows.
+    force_finite=True,     # Get rid of NaN/Inf gradients before feeding them to the optimizer.
+    cudnn_benchmark=True,     # Enable torch.backends.cudnn.benchmark?
+    device=torch.device('cuda'),
 ):
     # Initialize.
     prev_status_time = time.time()
@@ -100,16 +104,26 @@ def training_loop(
     assert snapshot_nimg is None or (snapshot_nimg % batch_size == 0 and snapshot_nimg % 1024 == 0)
     assert checkpoint_nimg is None or (checkpoint_nimg % batch_size == 0 and checkpoint_nimg % 1024 == 0)
 
+    # Loading the 1stage trained
+    dist.print0('Loading the first stage model...')
+    try:
+        with open(preload_model, 'rb') as f:
+            preload_model = pickle.load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError('You have to define a pretrained model. This fork is only for finetuning')
     # Setup dataset, encoder, and network.
     dist.print0('Loading dataset...')
     dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs)
     ref_image, ref_label = dataset_obj[0]
     dist.print0('Setting up encoder...')
-    encoder = dnnlib.util.construct_class_by_name(**encoder_kwargs)
+    encoder = preload_model['encoder']
+    # encoder = dnnlib.util.construct_class_by_name(**encoder_kwargs)
     ref_image = encoder.encode_latents(torch.as_tensor(ref_image).to(device).unsqueeze(0))
     dist.print0('Constructing network...')
     interface_kwargs = dict(img_resolution=ref_image.shape[-1], img_channels=ref_image.shape[1], label_dim=ref_label.shape[-1])
-    net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs)
+    #
+    net = preload_model['ema'].to(torch.float32)
+    # net = dnnlib.util.construct_class_by_name(**network_kwargs, **interface_kwargs)
     net.train().requires_grad_(True).to(device)
 
     # Print network summary.
@@ -134,7 +148,7 @@ def training_loop(
     stop_at_nimg = total_nimg
     if slice_nimg is not None:
         granularity = checkpoint_nimg if checkpoint_nimg is not None else snapshot_nimg if snapshot_nimg is not None else batch_size
-        slice_end_nimg = (state.cur_nimg + slice_nimg) // granularity * granularity # round down
+        slice_end_nimg = (state.cur_nimg + slice_nimg) // granularity * granularity  # round down
         stop_at_nimg = min(stop_at_nimg, slice_end_nimg)
     assert stop_at_nimg > state.cur_nimg
     dist.print0(f'Training from {state.cur_nimg // 1000} kimg to {stop_at_nimg // 1000} kimg:')
@@ -157,15 +171,16 @@ def training_loop(
             cur_process = psutil.Process(os.getpid())
             cpu_memory_usage = sum(p.memory_info().rss for p in [cur_process] + cur_process.children(recursive=True))
             dist.print0(' '.join(['Status:',
-                'kimg',         f"{training_stats.report0('Progress/kimg',                              state.cur_nimg / 1e3):<9.1f}",
-                'time',         f"{dnnlib.util.format_time(training_stats.report0('Timing/total_sec',   state.total_elapsed_time)):<12s}",
-                'sec/tick',     f"{training_stats.report0('Timing/sec_per_tick',                        cur_time - prev_status_time):<8.2f}",
-                'sec/kimg',     f"{training_stats.report0('Timing/sec_per_kimg',                        cumulative_training_time / max(state.cur_nimg - prev_status_nimg, 1) * 1e3):<7.3f}",
-                'maintenance',  f"{training_stats.report0('Timing/maintenance_sec',                     cur_time - prev_status_time - cumulative_training_time):<7.2f}",
-                'cpumem',       f"{training_stats.report0('Resources/cpu_mem_gb',                       cpu_memory_usage / 2**30):<6.2f}",
-                'gpumem',       f"{training_stats.report0('Resources/peak_gpu_mem_gb',                  torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}",
-                'reserved',     f"{training_stats.report0('Resources/peak_gpu_mem_reserved_gb',         torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}",
-            ]))
+                                  'kimg',         f"{training_stats.report0('Progress/kimg',                              state.cur_nimg / 1e3):<9.1f}",
+                                  'time',         f"{dnnlib.util.format_time(training_stats.report0('Timing/total_sec',   state.total_elapsed_time)):<12s}",
+                                  'sec/tick',     f"{training_stats.report0('Timing/sec_per_tick',                        cur_time - prev_status_time):<8.2f}",
+                                  'sec/kimg',     f"{training_stats.report0('Timing/sec_per_kimg',                        cumulative_training_time / max(state.cur_nimg - prev_status_nimg, 1) * 1e3):<7.3f}",
+                                  'maintenance',  f"{training_stats.report0('Timing/maintenance_sec',                     cur_time - prev_status_time - cumulative_training_time):<7.2f}",
+                                  'cpumem',       f"{training_stats.report0('Resources/cpu_mem_gb',                       cpu_memory_usage / 2**30):<6.2f}",
+                                  'gpumem',       f"{training_stats.report0('Resources/peak_gpu_mem_gb',                  torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}",
+                                  'reserved',     f"{training_stats.report0('Resources/peak_gpu_mem_reserved_gb',         torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}",
+                                  ]))
+
             cumulative_training_time = 0
             prev_status_nimg = state.cur_nimg
             prev_status_time = cur_time
@@ -201,7 +216,7 @@ def training_loop(
                 with open(os.path.join(run_dir, fname), 'wb') as f:
                     pickle.dump(data, f)
                 dist.print0('done')
-                del data # conserve memory
+                del data  # conserve memory
 
         # Save state checkpoint.
         if checkpoint_nimg is not None and (done or state.cur_nimg % checkpoint_nimg == 0) and state.cur_nimg != start_nimg:
@@ -241,4 +256,4 @@ def training_loop(
             ema.update(cur_nimg=state.cur_nimg, batch_size=batch_size)
         cumulative_training_time += time.time() - batch_start_time
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
