@@ -7,6 +7,7 @@
 
 """Tool for creating ZIP/PNG based datasets."""
 
+from torch.utils.data import Dataset, DataLoader
 from collections.abc import Iterator
 from dataclasses import dataclass
 import functools
@@ -23,18 +24,22 @@ import PIL.Image
 import torch
 from tqdm import tqdm
 
+from torch_utils import distributed as dist
 from training.encoders import StabilityVAEEncoder
 
-#----------------------------------------------------------------------------
+PIL.Image.init()
+# ----------------------------------------------------------------------------
+
 
 @dataclass
 class ImageEntry:
     img: np.ndarray
     label: Optional[int]
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Parse a 'M,N' or 'MxN' integer tuple.
 # Example: '4x2' returns (4,2)
+
 
 def parse_tuple(s: str) -> Tuple[int, int]:
     m = re.match(r'^(\d+)[x,](\d+)$', s)
@@ -42,29 +47,34 @@ def parse_tuple(s: str) -> Tuple[int, int]:
         return int(m.group(1)), int(m.group(2))
     raise click.ClickException(f'cannot parse tuple {s}')
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def maybe_min(a: int, b: Optional[int]) -> int:
     if b is not None:
         return min(a, b)
     return a
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def file_ext(name: Union[str, Path]) -> str:
     return str(name).split('.')[-1]
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def is_image_ext(fname: Union[str, Path]) -> bool:
     ext = file_ext(fname).lower()
     return f'.{ext}' in PIL.Image.EXTENSION
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def open_image_folder(source_dir, *, max_images: Optional[int]) -> tuple[int, Iterator[ImageEntry]]:
     input_images = []
-    def _recurse_dirs(root: str): # workaround Path().rglob() slowness
+
+    def _recurse_dirs(root: str):  # workaround Path().rglob() slowness
         with os.scandir(root) as it:
             for e in it:
                 if e.is_file():
@@ -101,7 +111,8 @@ def open_image_folder(source_dir, *, max_images: Optional[int]) -> tuple[int, It
                 break
     return max_idx, iterate_images()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def open_image_zip(source, *, max_images: Optional[int]) -> tuple[int, Iterator[ImageEntry]]:
     with zipfile.ZipFile(source, mode='r') as z:
@@ -126,7 +137,8 @@ def open_image_zip(source, *, max_images: Optional[int]) -> tuple[int, Iterator[
                     break
     return max_idx, iterate_images()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def make_transform(
     transform: Optional[str],
@@ -146,7 +158,7 @@ def make_transform(
 
     def center_crop(width, height, img):
         crop = np.min(img.shape[:2])
-        img = img[(img.shape[0] - crop) // 2 : (img.shape[0] + crop) // 2, (img.shape[1] - crop) // 2 : (img.shape[1] + crop) // 2]
+        img = img[(img.shape[0] - crop) // 2: (img.shape[0] + crop) // 2, (img.shape[1] - crop) // 2: (img.shape[1] + crop) // 2]
         img = PIL.Image.fromarray(img, 'RGB')
         img = img.resize((width, height), PIL.Image.Resampling.LANCZOS)
         return np.array(img)
@@ -156,13 +168,13 @@ def make_transform(
         if img.shape[1] < width or ch < height:
             return None
 
-        img = img[(img.shape[0] - ch) // 2 : (img.shape[0] + ch) // 2]
+        img = img[(img.shape[0] - ch) // 2: (img.shape[0] + ch) // 2]
         img = PIL.Image.fromarray(img, 'RGB')
         img = img.resize((width, height), PIL.Image.Resampling.LANCZOS)
         img = np.array(img)
 
         canvas = np.zeros([width, width, 3], dtype=np.uint8)
-        canvas[(width - height) // 2 : (width + height) // 2, :] = img
+        canvas[(width - height) // 2: (width + height) // 2, :] = img
         return canvas
 
     def center_crop_imagenet(image_size: int, arr: np.ndarray):
@@ -204,7 +216,8 @@ def make_transform(
         return functools.partial(center_crop_imagenet, output_width)
     assert False, 'unknown transform'
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def open_dataset(source, *, max_images: Optional[int]):
     if os.path.isdir(source):
@@ -217,7 +230,8 @@ def open_dataset(source, *, max_images: Optional[int]):
     else:
         raise click.ClickException(f'Missing input file or directory: {source}')
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None], Callable[[], None]]:
     dest_ext = file_ext(dest)
@@ -226,6 +240,7 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
         if os.path.dirname(dest) != '':
             os.makedirs(os.path.dirname(dest), exist_ok=True)
         zf = zipfile.ZipFile(file=dest, mode='w', compression=zipfile.ZIP_STORED)
+
         def zip_write_bytes(fname: str, data: Union[bytes, str]):
             zf.writestr(fname, data)
         return '', zip_write_bytes, zf.close
@@ -249,7 +264,8 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
                 fout.write(data)
         return dest, folder_write_bytes, lambda: None
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 @click.group()
 def cmdline():
@@ -257,7 +273,8 @@ def cmdline():
     if os.environ.get('WORLD_SIZE', '1') != '1':
         raise click.ClickException('Distributed execution is not supported.')
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 @cmdline.command()
 @click.option('--source',     help='Input directory or archive name', metavar='PATH',   type=str, required=True)
@@ -265,7 +282,6 @@ def cmdline():
 @click.option('--max-images', help='Maximum number of images to output', metavar='INT', type=int)
 @click.option('--transform',  help='Input crop/resize mode', metavar='MODE',            type=click.Choice(['center-crop', 'center-crop-wide', 'center-crop-dhariwal']))
 @click.option('--resolution', help='Output resolution (e.g., 512x512)', metavar='WxH',  type=parse_tuple)
-
 def convert(
     source: str,
     dest: str,
@@ -373,29 +389,40 @@ def convert(
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
     close_dest()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 @cmdline.command()
 @click.option('--model-url',  help='VAE encoder model', metavar='URL',                  type=str, default='stabilityai/sd-vae-ft-mse', show_default=True)
 @click.option('--source',     help='Input directory or archive name', metavar='PATH',   type=str, required=True)
 @click.option('--dest',       help='Output directory or archive name', metavar='PATH',  type=str, required=True)
 @click.option('--max-images', help='Maximum number of images to output', metavar='INT', type=int)
-
+@click.option('--batch', help='Maximum number of images to output', metavar='INT', type=int, default=1)
 def encode(
     model_url: str,
     source: str,
     dest: str,
     max_images: Optional[int],
+    batch: Optional[int],
 ):
     """Encode pixel data to VAE latents."""
     PIL.Image.init()
     if dest == '':
         raise click.ClickException('--dest output filename or directory must not be an empty string')
 
-    vae = StabilityVAEEncoder(vae_name=model_url, batch_size=1)
+    vae = StabilityVAEEncoder(vae_name=model_url, batch_size=batch)
     num_files, input_iter = open_dataset(source, max_images=max_images)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
     labels = []
+
+    class ImageIterableDataset(torch.utils.data.IterableDataset):
+        def __init__(self, iterable):
+            self.iterable = iterable
+
+        def __iter__(self):
+            for img in self.iterable:
+                img_tensor = torch.tensor(img.img).permute(2, 0, 1)  # [C, H, W]
+                yield img_tensor, img.label
 
     for idx, image in tqdm(enumerate(input_iter), total=num_files):
         img_tensor = torch.tensor(image.img).to('cuda').permute(2, 0, 1).unsqueeze(0)
@@ -412,14 +439,14 @@ def encode(
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
     close_dest()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 @cmdline.command()
 @click.option('--model-url',  help='VAE encoder model', metavar='URL',                  type=str, default='stabilityai/sd-vae-ft-mse', show_default=True)
 @click.option('--source',     help='Input directory or archive name', metavar='PATH',   type=str, required=True)
 @click.option('--dest',       help='Output directory or archive name', metavar='PATH',  type=str, required=True)
 @click.option('--max-images', help='Maximum number of images to output', metavar='INT', type=int)
-
 def decode(
     model_url: str,
     source: str,
@@ -454,9 +481,124 @@ def decode(
     save_bytes(os.path.join(archive_root_dir, 'dataset.json'), json.dumps(metadata))
     close_dest()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+# python Diffusion_finetuning_project/dataset_tool.py process-and-encode --source=dataset/ --dest=datasetMichel/ --transform=center-crop-dhariwal --batch-size=64 --gpu-batch-size=64 --num-workers=0
+
+
+class ImageDataset(Dataset):
+    def __init__(self, image_paths, transform_fn):
+        self.image_paths = image_paths
+        self.transform_fn = transform_fn
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        img = np.array(PIL.Image.open(img_path).convert('RGB'))
+        img = self.transform_fn(img)
+        if img is None:
+            return None
+        return img, img_path
+
+
+@cmdline.command()
+@click.option('--source',     help='Input directory containing categorized images', metavar='PATH',   type=str, required=True)
+@click.option('--dest',       help='Output directory for latent embeddings', metavar='PATH',  type=str, required=True)
+@click.option('--model-url',  help='VAE encoder model', metavar='URL', type=str, default='stabilityai/sd-vae-ft-mse', show_default=True)
+@click.option('--resolution', help='Output resolution (e.g., 512x512)', metavar='WxH', type=parse_tuple, default='512x512')
+@click.option('--transform',  help='Input crop/resize mode', metavar='MODE', type=click.Choice(['center-crop', 'center-crop-wide', 'center-crop-dhariwal']))
+@click.option('--batch-size', help='Batch size for VAE encoding', metavar='INT', type=int, default=32)
+@click.option('--num-workers', help='Number of worker processes', metavar='INT', type=int, default=4)
+@click.option('--gpu-batch-size', help='Maximum batch size per GPU', metavar='INT', type=int, default=8)
+def process_and_encode(
+    source: str,
+    dest: str,
+    model_url: str,
+    resolution: Tuple[int, int],
+    transform: Optional[str],
+    batch_size: int,
+    num_workers: int,
+    gpu_batch_size: int,
+):
+    """Process images and encode them to latents while maintaining folder structure."""
+
+    # import torch.multiprocessing as mp
+    # Initialize distributed processing
+
+    # dist.init_process_group(backend='nccl')
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    # Create output directory
+    os.makedirs(dest, exist_ok=True)
+
+    # Collect all image paths while preserving structure
+    image_paths = []
+    category_map = {}
+    for category in os.listdir(source):
+        category_path = os.path.join(source, category)
+        if not os.path.isdir(category_path):
+            continue
+
+        output_category_path = os.path.join(dest, category)
+        os.makedirs(output_category_path, exist_ok=True)
+
+        for img_name in os.listdir(category_path):
+            if not is_image_ext(img_name):
+                continue
+            img_path = os.path.join(category_path, img_name)
+            image_paths.append(img_path)
+            category_map[img_path] = category
+
+    # Initialize transform function
+
+    transform_fn = make_transform(transform, *resolution)
+
+    # Create dataset and dataloader
+    dataset = ImageDataset(image_paths, transform_fn)
+
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=2 if num_workers > 0 else None
+    )
+
+    # Initialize VAE encoder
+    vae = StabilityVAEEncoder(vae_name=model_url, batch_size=gpu_batch_size)
+    vae.init(torch.device(f'cuda:{rank}'))
+    # Process batches
+    for batch_idx, (images, paths) in tqdm(enumerate(dataloader), total=len(dataloader), disable=dist.get_rank() != 0):
+        if images is None:
+            continue
+
+        # Process in smaller GPU batches
+        latents = []
+        images = images.permute(0, 3, 1, 2).requires_grad_(False).to(f'cuda:{rank}')
+        latents = vae.encode_pixels(images).cpu()
+
+        for path, latent in zip(paths, latents):
+            category = category_map[path]
+            latent_name = os.path.splitext(os.path.basename(path))[0] + '.npy'
+            latent_path = os.path.join(dest, category, latent_name)
+            np.save(latent_path, latent)
+
+    # dist.destroy_process_group()
+# ----------------------------------------------------------------------------
+
 
 if __name__ == "__main__":
     cmdline()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
