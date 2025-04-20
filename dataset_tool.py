@@ -140,81 +140,61 @@ def open_image_zip(source, *, max_images: Optional[int]) -> tuple[int, Iterator[
 # ----------------------------------------------------------------------------
 
 
-def make_transform(
-    transform: Optional[str],
-    output_width: Optional[int],
-    output_height: Optional[int]
-) -> Callable[[np.ndarray], Optional[np.ndarray]]:
-    def scale(width, height, img):
-        w = img.shape[1]
-        h = img.shape[0]
-        if width == w and height == h:
-            return img
-        img = PIL.Image.fromarray(img, 'RGB')
-        ww = width if width is not None else w
-        hh = height if height is not None else h
-        img = img.resize((ww, hh), PIL.Image.Resampling.LANCZOS)
-        return np.array(img)
+def scale(img, w, h):
+    if img.shape[1] == w and img.shape[0] == h:
+        return img
+    return np.array(PIL.Image.fromarray(img).resize((w or img.shape[1], h or img.shape[0]), PIL.Image.Resampling.LANCZOS))
 
-    def center_crop(width, height, img):
-        crop = np.min(img.shape[:2])
-        img = img[(img.shape[0] - crop) // 2: (img.shape[0] + crop) // 2, (img.shape[1] - crop) // 2: (img.shape[1] + crop) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), PIL.Image.Resampling.LANCZOS)
-        return np.array(img)
 
-    def center_crop_wide(width, height, img):
-        ch = int(np.round(width * img.shape[0] / img.shape[1]))
-        if img.shape[1] < width or ch < height:
-            return None
+def center_crop(img, w, h):
+    c = min(img.shape[:2])
+    img = img[(img.shape[0]-c)//2:(img.shape[0]+c)//2, (img.shape[1]-c)//2:(img.shape[1]+c)//2]
+    return np.array(PIL.Image.fromarray(img).resize((w, h), PIL.Image.Resampling.LANCZOS))
 
-        img = img[(img.shape[0] - ch) // 2: (img.shape[0] + ch) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), PIL.Image.Resampling.LANCZOS)
-        img = np.array(img)
 
-        canvas = np.zeros([width, width, 3], dtype=np.uint8)
-        canvas[(width - height) // 2: (width + height) // 2, :] = img
-        return canvas
+def center_crop_wide(img, w, h):
+    ch = int(round(w * img.shape[0] / img.shape[1]))
+    if img.shape[1] < w or ch < h:
+        return None
+    img = img[(img.shape[0]-ch)//2:(img.shape[0]+ch)//2]
+    img = np.array(PIL.Image.fromarray(img).resize((w, h), PIL.Image.Resampling.LANCZOS))
+    canvas = np.zeros([w, w, 3], dtype=np.uint8)
+    canvas[(w - h)//2:(w + h)//2, :] = img
+    return canvas
 
-    def center_crop_imagenet(image_size: int, arr: np.ndarray):
-        """
-        Center cropping implementation from ADM.
-        https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
-        """
-        pil_image = PIL.Image.fromarray(arr)
-        while min(*pil_image.size) >= 2 * image_size:
-            new_size = tuple(x // 2 for x in pil_image.size)
-            assert len(new_size) == 2
-            pil_image = pil_image.resize(new_size, resample=PIL.Image.Resampling.BOX)
 
-        scale = image_size / min(*pil_image.size)
-        new_size = tuple(round(x * scale) for x in pil_image.size)
-        assert len(new_size) == 2
-        pil_image = pil_image.resize(new_size, resample=PIL.Image.Resampling.BICUBIC)
+def center_crop_imagenet(img, size):
+    p = PIL.Image.fromarray(img)
+    while min(*p.size) >= 2 * size:
+        p = p.resize((p.size[0]//2, p.size[1]//2), PIL.Image.Resampling.BOX)
+    scale = size / min(*p.size)
+    p = p.resize((round(p.size[0]*scale), round(p.size[1]*scale)), PIL.Image.Resampling.BICUBIC)
+    arr = np.array(p)
+    y, x = (arr.shape[0]-size)//2, (arr.shape[1]-size)//2
+    return arr[y:y+size, x:x+size]
 
-        arr = np.array(pil_image)
-        crop_y = (arr.shape[0] - image_size) // 2
-        crop_x = (arr.shape[1] - image_size) // 2
-        return arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size]
 
-    if transform is None:
-        return functools.partial(scale, output_width, output_height)
-    if transform == 'center-crop':
-        if output_width is None or output_height is None:
-            raise click.ClickException('must specify --resolution=WxH when using ' + transform + 'transform')
-        return functools.partial(center_crop, output_width, output_height)
-    if transform == 'center-crop-wide':
-        if output_width is None or output_height is None:
-            raise click.ClickException('must specify --resolution=WxH when using ' + transform + ' transform')
-        return functools.partial(center_crop_wide, output_width, output_height)
-    if transform == 'center-crop-dhariwal':
-        if output_width is None or output_height is None:
-            raise click.ClickException('must specify --resolution=WxH when using ' + transform + ' transform')
-        if output_width != output_height:
-            raise click.ClickException('width and height must match in --resolution=WxH when using ' + transform + ' transform')
-        return functools.partial(center_crop_imagenet, output_width)
-    assert False, 'unknown transform'
+class TransformWrapper:
+    def __init__(self, mode, w, h):
+        self.mode = mode
+        self.w = w
+        self.h = h
+
+    def __call__(self, img):
+        if self.mode is None:
+            return scale(img, self.w, self.h)
+        if self.mode == 'center-crop':
+            return center_crop(img, self.w, self.h)
+        if self.mode == 'center-crop-wide':
+            return center_crop_wide(img, self.w, self.h)
+        if self.mode == 'center-crop-dhariwal':
+            return center_crop_imagenet(img, self.w)
+        raise ValueError('Unknown transform: ' + self.mode)
+
+
+def make_transform(transform, w, h):
+    return TransformWrapper(transform, w, h)
+
 
 # ----------------------------------------------------------------------------
 
@@ -270,8 +250,8 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
 @click.group()
 def cmdline():
     '''Dataset processing tool for dataset image data conversion and VAE encode/decode preprocessing.'''
-    if os.environ.get('WORLD_SIZE', '1') != '1':
-        raise click.ClickException('Distributed execution is not supported.')
+    # if os.environ.get('WORLD_SIZE', '1') != '1':
+    #     raise click.ClickException('Distributed execution is not supported.')
 
 # ----------------------------------------------------------------------------
 
@@ -527,8 +507,8 @@ def process_and_encode(
 
     # import torch.multiprocessing as mp
     # Initialize distributed processing
-
-    # dist.init_process_group(backend='nccl')
+    torch.multiprocessing.set_start_method('spawn')
+    dist.init()
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
@@ -574,6 +554,8 @@ def process_and_encode(
         pin_memory=True,
         prefetch_factor=2 if num_workers > 0 else None
     )
+    print(f"[Rank {rank}] Processing {len(dataloader)} batches.", flush=True)
+    print(f"[Rank {rank}] Total images in shard: {len(sampler)}", flush=True)
 
     # Initialize VAE encoder
     vae = StabilityVAEEncoder(vae_name=model_url, batch_size=gpu_batch_size)
