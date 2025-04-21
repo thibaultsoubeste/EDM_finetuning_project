@@ -8,6 +8,7 @@
 """Train diffusion models according to the EDM2 recipe from the paper
 "Analyzing and Improving the Training Dynamics of Diffusion Models"."""
 
+import re
 import os
 import json
 import warnings
@@ -64,21 +65,20 @@ def setup_training_config(preset='edm2-img512-s', **opts):
         path=opts.data,
         use_labels=opts.get('cond', True),
         nima_threshold=opts.get('nima_threshold'),
-        categories=[cat.strip() for cat in opts.get('categories', '').split(',')] if opts.get('categories') else None,
+        categories=opts.get('categories', None),
         top_percent=opts.get('top_percent'),
-        top_per_category=opts.get('top_per_category')
+        top_per_category=opts.get('top_per_category'),
+        max_size=opts.get('max_size', None)
     )
     try:
-        print(3)
         dataset_obj = dnnlib.util.construct_class_by_name(**c.dataset_kwargs)
-        print(4)
         dataset_channels = dataset_obj.num_channels
+        print(len(dataset_obj)), quit()
         if c.dataset_kwargs.use_labels and not dataset_obj.has_labels:
             raise click.ClickException('--cond=True, but no labels found in the dataset')
         del dataset_obj  # conserve memory
     except IOError as err:
         raise click.ClickException(f'--data: {err}')
-
     # Encoder.
     if dataset_channels == 3:
         c.encoder_kwargs = dnnlib.EasyDict(class_name='training.encoders.StandardRGBEncoder')
@@ -159,6 +159,22 @@ def parse_nimg(s):
         return int(s[:-2]) << 30
     return int(s)
 
+
+def parse_int_list(s):
+    if s is None:
+        return None
+    if isinstance(s, list):
+        return s
+    ranges = []
+    range_re = re.compile(r'^(\d+)-(\d+)$')
+    for p in s.split(','):
+        m = range_re.match(p)
+        if m:
+            ranges.extend(range(int(m.group(1)), int(m.group(2))+1))
+        else:
+            ranges.append(int(p))
+    return ranges
+
 # ----------------------------------------------------------------------------
 # Command line interface.
 
@@ -172,7 +188,8 @@ def parse_nimg(s):
 @click.option('--preset',           help='Configuration preset', metavar='STR',                 type=str, default='edm2-img512-s', show_default=True)
 # Dataset filtering options
 @click.option('--nima-threshold',   help='Minimum NIMA score for images', metavar='FLOAT',      type=float, default=None, show_default=True)
-@click.option('--categories',       help='Comma-separated list of categories to include',        type=str, default=None, show_default=True)
+@click.option('--max-size',         help='Max size of the dataset', metavar='FLOAT',            type=float, default=None, show_default=True)
+@click.option('--categories',       help='Comma-separated list of categories to include (0,1,12-14)',        type=parse_int_list, default=None, show_default=True)
 @click.option('--top-percent',      help='Keep top X% of images by NIMA score', metavar='FLOAT', type=float, default=None, show_default=True)
 @click.option('--top-per-category', help='Keep top X% of images in each category', metavar='FLOAT', type=float, default=None, show_default=True)
 # Hyperparameters.

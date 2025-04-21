@@ -261,6 +261,7 @@ class FilteredImageDataset(ImageFolderDataset):
                  categories=None,  # List of categories to include (None = all categories)
                  top_percent=None,  # Keep top X% of images by NIMA score (None = no filtering)
                  top_per_category=None,  # Keep top X% of images in each category (None = no filtering)
+                 max_size=None,
                  **super_kwargs,         # Additional arguments for the Dataset base class.
                  ):
         if path.endswith('.zip'):
@@ -268,6 +269,7 @@ class FilteredImageDataset(ImageFolderDataset):
 
         # Load and filter metadata
         super().__init__(path=path, resolution=resolution, **super_kwargs)
+        self._max_size = max_size
         self._metadata = self._load_metadata()
         self._uniquelabels = np.sort([folder for folder in os.listdir(path) if os.path.isdir(os.path.join(path, folder))])
         self._labels2idxmapping = {foldername: idx for idx, foldername in enumerate(self._uniquelabels)}
@@ -289,15 +291,14 @@ class FilteredImageDataset(ImageFolderDataset):
         """Filter image filenames based on NIMA score, categories, and top percentage."""
         if not self._metadata:
             return
-
+        categories = self._uniquelabels[categories]
         # First filter by NIMA threshold and categories
         filtered_fnames = []
         category_scores = {}  # Store scores by category for later filtering
 
         for fname in self._image_fnames:
             rel_path = fname.replace('\\', '/')
-            meta = self._metadata.get(rel_path, {})
-
+            meta = self._metadata.get(rel_path.replace('.npy', ''), {})
             # Check NIMA score
             if nima_threshold is not None:
                 nima_score = meta.get('nima', 0)
@@ -305,10 +306,9 @@ class FilteredImageDataset(ImageFolderDataset):
                     continue
 
             # Check category
-            category = meta.get('category', '')
+            category = meta.get('labels', '')
             if categories is not None and category not in categories:
                 continue
-
             # Store scores for later filtering
             if category not in category_scores:
                 category_scores[category] = []
@@ -360,11 +360,12 @@ class FilteredImageDataset(ImageFolderDataset):
             self._raw_idx = np.sort(self._raw_idx[:self._max_size])
 
         # Update xflip if needed
-        if self._xflip:
+        if self._xflip.sum() > 0:
             self._xflip = np.zeros(self._raw_idx.size, dtype=np.uint8)
-            if self._xflip:
-                self._raw_idx = np.tile(self._raw_idx, 2)
-                self._xflip = np.concatenate([self._xflip, np.ones_like(self._xflip)])
+            self._raw_idx = np.tile(self._raw_idx, 2)
+            self._xflip = np.concatenate([self._xflip, np.ones_like(self._xflip)])
+        else:
+            self._xflip = np.zeros(self._raw_idx.size, dtype=np.uint8)
 
     def get_metadata(self, idx):
         """Get metadata for a specific image index."""
