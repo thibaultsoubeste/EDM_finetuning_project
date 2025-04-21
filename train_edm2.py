@@ -73,6 +73,7 @@ def setup_training_config(preset='edm2-img512-s', **opts):
     try:
         dataset_obj = dnnlib.util.construct_class_by_name(**c.dataset_kwargs)
         dataset_channels = dataset_obj.num_channels
+        dist.print0("Number of images in the dataset:", len(dataset_obj))
         if c.dataset_kwargs.use_labels and not dataset_obj.has_labels:
             raise click.ClickException('--cond=True, but no labels found in the dataset')
         del dataset_obj  # conserve memory
