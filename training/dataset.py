@@ -20,24 +20,25 @@ try:
 except ImportError:
     pyspng = None
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Abstract base class for datasets.
+
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self,
-        name,                   # Name of the dataset.
-        raw_shape,              # Shape of the raw image data (NCHW).
-        use_labels  = True,     # Enable conditioning labels? False = label dimension is zero.
-        max_size    = None,     # Artificially limit the size of the dataset. None = no limit. Applied before xflip.
-        xflip       = False,    # Artificially double the size of the dataset via x-flips. Applied after max_size.
-        random_seed = 0,        # Random seed to use when applying max_size.
-        cache       = False,    # Cache images in CPU memory?
-    ):
+                 name,                   # Name of the dataset.
+                 raw_shape,              # Shape of the raw image data (NCHW).
+                 use_labels=True,     # Enable conditioning labels? False = label dimension is zero.
+                 max_size=None,     # Artificially limit the size of the dataset. None = no limit. Applied before xflip.
+                 xflip=False,    # Artificially double the size of the dataset via x-flips. Applied after max_size.
+                 random_seed=0,        # Random seed to use when applying max_size.
+                 cache=False,    # Cache images in CPU memory?
+                 ):
         self._name = name
         self._raw_shape = list(raw_shape)
         self._use_labels = use_labels
         self._cache = cache
-        self._cached_images = dict() # {raw_idx: np.ndarray, ...}
+        self._cached_images = dict()  # {raw_idx: np.ndarray, ...}
         self._raw_labels = None
         self._label_shape = None
 
@@ -66,13 +67,13 @@ class Dataset(torch.utils.data.Dataset):
                 assert np.all(self._raw_labels >= 0)
         return self._raw_labels
 
-    def close(self): # to be overridden by subclass
+    def close(self):  # to be overridden by subclass
         pass
 
-    def _load_raw_image(self, raw_idx): # to be overridden by subclass
+    def _load_raw_image(self, raw_idx):  # to be overridden by subclass
         raise NotImplementedError
 
-    def _load_raw_labels(self): # to be overridden by subclass
+    def _load_raw_labels(self):  # to be overridden by subclass
         raise NotImplementedError
 
     def __getstate__(self):
@@ -97,7 +98,7 @@ class Dataset(torch.utils.data.Dataset):
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self._raw_shape[1:]
         if self._xflip[idx]:
-            assert image.ndim == 3 # CHW
+            assert image.ndim == 3  # CHW
             image = image[:, :, ::-1]
         return image.copy(), self.get_label(idx)
 
@@ -121,17 +122,17 @@ class Dataset(torch.utils.data.Dataset):
         return self._name
 
     @property
-    def image_shape(self): # [CHW]
+    def image_shape(self):  # [CHW]
         return list(self._raw_shape[1:])
 
     @property
     def num_channels(self):
-        assert len(self.image_shape) == 3 # CHW
+        assert len(self.image_shape) == 3  # CHW
         return self.image_shape[0]
 
     @property
     def resolution(self):
-        assert len(self.image_shape) == 3 # CHW
+        assert len(self.image_shape) == 3  # CHW
         assert self.image_shape[1] == self.image_shape[2]
         return self.image_shape[1]
 
@@ -158,16 +159,17 @@ class Dataset(torch.utils.data.Dataset):
     def has_onehot_labels(self):
         return self._get_raw_labels().dtype == np.int64
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Dataset subclass that loads images recursively from the specified directory
 # or ZIP file.
 
+
 class ImageFolderDataset(Dataset):
     def __init__(self,
-        path,                   # Path to directory or zip.
-        resolution      = None, # Ensure specific resolution, None = anything goes.
-        **super_kwargs,         # Additional arguments for the Dataset base class.
-    ):
+                 path,                   # Path to directory or zip.
+                 resolution=None,  # Ensure specific resolution, None = anything goes.
+                 **super_kwargs,         # Additional arguments for the Dataset base class.
+                 ):
         self._path = path
         self._zipfile = None
 
@@ -248,4 +250,136 @@ class ImageFolderDataset(Dataset):
         labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
         return labels
 
-#----------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+
+class FilteredImageDataset(ImageFolderDataset):
+    def __init__(self,
+                 path,                   # Path to directory or zip.
+                 resolution=None,  # Ensure specific resolution, None = anything goes.
+                 nima_threshold=None,  # Minimum NIMA score to include (None = no filtering)
+                 categories=None,  # List of categories to include (None = all categories)
+                 top_percent=None,  # Keep top X% of images by NIMA score (None = no filtering)
+                 top_per_category=None,  # Keep top X% of images in each category (None = no filtering)
+                 **super_kwargs,         # Additional arguments for the Dataset base class.
+                 ):
+        if path.endswith('.zip'):
+            raise NotImplementedError("Custom dataloader doesn't work with zip format")
+
+        # Load and filter metadata
+        super().__init__(path=path, resolution=resolution, **super_kwargs)
+        self._metadata = self._load_metadata()
+        self._uniquelabels = np.sort([folder for folder in os.listdir(path) if os.path.isdir(os.path.join(path, folder))])
+        self._labels2idxmapping = {foldername: idx for idx, foldername in enumerate(self._uniquelabels)}
+        if nima_threshold is not None or categories is not None or top_percent is not None or top_per_category is not None:
+            self._filter_fnames(nima_threshold, categories, top_percent, top_per_category)
+
+    def _load_metadata(self):
+        """Load metadata from dataset.json with caching."""
+        if not hasattr(self, '_metadata_cache'):
+            meta_fname = 'metadata.json'
+            if meta_fname not in self._all_fnames:
+                return {}
+            with self._open_file(os.path.abspath(os.path.join(self._path, meta_fname))) as f:
+                data = json.load(f)
+                self._metadata_cache = data.get('metadata', {})
+        return self._metadata_cache
+
+    def _filter_fnames(self, nima_threshold, categories, top_percent, top_per_category):
+        """Filter image filenames based on NIMA score, categories, and top percentage."""
+        if not self._metadata:
+            return
+
+        # First filter by NIMA threshold and categories
+        filtered_fnames = []
+        category_scores = {}  # Store scores by category for later filtering
+
+        for fname in self._image_fnames:
+            rel_path = fname.replace('\\', '/')
+            meta = self._metadata.get(rel_path, {})
+
+            # Check NIMA score
+            if nima_threshold is not None:
+                nima_score = meta.get('nima', 0)
+                if nima_score < nima_threshold:
+                    continue
+
+            # Check category
+            category = meta.get('category', '')
+            if categories is not None and category not in categories:
+                continue
+
+            # Store scores for later filtering
+            if category not in category_scores:
+                category_scores[category] = []
+            category_scores[category].append((fname, meta.get('nima', 0)))
+            filtered_fnames.append(fname)
+
+        # Apply top percentage filtering if requested
+        if top_percent is not None or top_per_category is not None:
+            final_fnames = set()
+
+            # Filter by top percentage per category
+            if top_per_category is not None:
+                for category, scores in category_scores.items():
+                    if not scores:
+                        continue
+                    # Sort by NIMA score in descending order
+                    scores.sort(key=lambda x: x[1], reverse=True)
+                    # Calculate number of images to keep (at least 1)
+                    keep_count = max(1, int(len(scores) * top_per_category / 100))
+                    # Add top images to final set
+                    final_fnames.update(fname for fname, _ in scores[:keep_count])
+
+            # Filter by overall top percentage
+            if top_percent is not None:
+                # Combine all scores
+                all_scores = [(fname, meta.get('nima', 0)) for fname in filtered_fnames]
+                # Sort by NIMA score in descending order
+                all_scores.sort(key=lambda x: x[1], reverse=True)
+                # Calculate number of images to keep
+                keep_count = int(len(all_scores) * top_percent / 100)
+                # Add top images to final set
+                final_fnames.update(fname for fname, _ in all_scores[:keep_count])
+
+            # Update filtered_fnames with the intersection of both filters
+            if top_percent is not None and top_per_category is not None:
+                filtered_fnames = list(final_fnames)
+            elif top_percent is not None:
+                filtered_fnames = [fname for fname, _ in all_scores[:keep_count]]
+            elif top_per_category is not None:
+                filtered_fnames = list(final_fnames)
+
+        self._image_fnames = filtered_fnames
+        self._raw_shape[0] = len(filtered_fnames)
+
+        # Update raw_idx to match new filtered size
+        self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
+        if self._max_size is not None and self._raw_idx.size > self._max_size:
+            np.random.RandomState(self._random_seed % (1 << 31)).shuffle(self._raw_idx)
+            self._raw_idx = np.sort(self._raw_idx[:self._max_size])
+
+        # Update xflip if needed
+        if self._xflip:
+            self._xflip = np.zeros(self._raw_idx.size, dtype=np.uint8)
+            if self._xflip:
+                self._raw_idx = np.tile(self._raw_idx, 2)
+                self._xflip = np.concatenate([self._xflip, np.ones_like(self._xflip)])
+
+    def get_metadata(self, idx):
+        """Get metadata for a specific image index."""
+        fname = self._image_fnames[self._raw_idx[idx]]
+        rel_path = fname.replace('\\', '/')
+        return self._metadata.get(rel_path, {})
+
+    def _load_raw_labels(self):
+        labels = {k: v["labels"] for k, v in self._metadata.items()}
+        if not labels:
+            return None
+
+        # Match filenames
+        labels = [labels[fname.replace('\\', '/').replace('.npy', '')] for fname in self._image_fnames]
+        labels = np.array(labels)
+        labels = np.vectorize(lambda x: self._labels2idxmapping[x])(labels)
+        labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+        return labels

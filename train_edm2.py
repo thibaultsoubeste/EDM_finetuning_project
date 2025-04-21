@@ -17,7 +17,7 @@ import dnnlib
 from torch_utils import distributed as dist
 import training.training_loop
 
-warnings.filterwarnings('ignore', 'You are using `torch.load` with `weights_only=False`')
+warnings.filterwarnings('ignore', 'You are using torch.load with weights_only=False')
 
 # ----------------------------------------------------------------------------
 # Configuration presets.
@@ -57,9 +57,21 @@ def setup_training_config(preset='edm2-img512-s', **opts):
             opts[key] = value
 
     # Dataset.
-    c.dataset_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=opts.data, use_labels=opts.get('cond', True))
+    dataset_class = 'training.dataset.FilteredImageDataset'  # if any([opts.get('nima_threshold'), opts.get('categories'), opts.get('top_percent'), opts.get('top_per_category')]) else 'training.dataset.ImageFolderDataset'
+
+    c.dataset_kwargs = dnnlib.EasyDict(
+        class_name=dataset_class,
+        path=opts.data,
+        use_labels=opts.get('cond', True),
+        nima_threshold=opts.get('nima_threshold'),
+        categories=[cat.strip() for cat in opts.get('categories', '').split(',')] if opts.get('categories') else None,
+        top_percent=opts.get('top_percent'),
+        top_per_category=opts.get('top_per_category')
+    )
     try:
+        print(3)
         dataset_obj = dnnlib.util.construct_class_by_name(**c.dataset_kwargs)
+        print(4)
         dataset_channels = dataset_obj.num_channels
         if c.dataset_kwargs.use_labels and not dataset_obj.has_labels:
             raise click.ClickException('--cond=True, but no labels found in the dataset')
@@ -158,6 +170,11 @@ def parse_nimg(s):
 @click.option('--data',             help='Path to the dataset', metavar='ZIP|DIR',              type=str, required=True)
 @click.option('--cond',             help='Train class-conditional model', metavar='BOOL',       type=bool, default=True, show_default=True)
 @click.option('--preset',           help='Configuration preset', metavar='STR',                 type=str, default='edm2-img512-s', show_default=True)
+# Dataset filtering options
+@click.option('--nima-threshold',   help='Minimum NIMA score for images', metavar='FLOAT',      type=float, default=None, show_default=True)
+@click.option('--categories',       help='Comma-separated list of categories to include',        type=str, default=None, show_default=True)
+@click.option('--top-percent',      help='Keep top X% of images by NIMA score', metavar='FLOAT', type=float, default=None, show_default=True)
+@click.option('--top-per-category', help='Keep top X% of images in each category', metavar='FLOAT', type=float, default=None, show_default=True)
 # Hyperparameters.
 @click.option('--duration',         help='Training duration', metavar='NIMG',                   type=parse_nimg, default=None)
 @click.option('--batch',            help='Total batch size', metavar='NIMG',                    type=parse_nimg, default=None)
