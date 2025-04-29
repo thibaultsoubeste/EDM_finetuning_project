@@ -30,7 +30,9 @@ class CenterCropImagenet:
 
     def __call__(self, img):
         img = np.transpose(img, (1, 2, 0))  # CHW → HWC
-        p = PIL.Image.fromarray(img)
+        if img.shape[2] == 1:
+            img = img[:, :, 0]
+        p = PIL.Image.fromarray(img).convert('RGB')
         while min(*p.size) >= 2 * self.size:
             p = p.resize((p.size[0]//2, p.size[1]//2), PIL.Image.Resampling.BOX)
         scale = self.size / min(*p.size)
