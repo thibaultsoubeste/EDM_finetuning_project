@@ -20,20 +20,23 @@ from torch_utils import distributed as dist
 from torch_utils import misc
 from training import dataset
 import generate_images
+import json
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Abstract base class for feature detectors.
+
 
 class Detector:
     def __init__(self, feature_dim):
         self.feature_dim = feature_dim
 
-    def __call__(self, x): # NCHW, uint8, 3 channels => NC, float32
-        raise NotImplementedError # to be overridden by subclass
+    def __call__(self, x):  # NCHW, uint8, 3 channels => NC, float32
+        raise NotImplementedError  # to be overridden by subclass
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # InceptionV3 feature detector.
 # This is a direct PyTorch translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
+
 
 class InceptionV3Detector(Detector):
     def __init__(self):
@@ -45,9 +48,10 @@ class InceptionV3Detector(Detector):
     def __call__(self, x):
         return self.model.to(x.device)(x, return_features=True)
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # DINOv2 feature detector.
 # Modeled after https://github.com/layer6ai-labs/dgm-eval
+
 
 class DINOv2Detector(Detector):
     def __init__(self, resize_mode='torch'):
@@ -61,12 +65,12 @@ class DINOv2Detector(Detector):
 
     def __call__(self, x):
         # Resize images.
-        if self.resize_mode == 'pil': # Slow reference implementation that matches the original dgm-eval codebase exactly.
+        if self.resize_mode == 'pil':  # Slow reference implementation that matches the original dgm-eval codebase exactly.
             device = x.device
             x = x.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
             x = np.stack([np.uint8(PIL.Image.fromarray(xx, 'RGB').resize((224, 224), PIL.Image.Resampling.BICUBIC)) for xx in x])
             x = torch.from_numpy(x).permute(0, 3, 1, 2).to(device)
-        elif self.resize_mode == 'torch': # Fast practical implementation that yields almost the same results.
+        elif self.resize_mode == 'torch':  # Fast practical implementation that yields almost the same results.
             x = torch.nn.functional.interpolate(x.to(torch.float32), size=(224, 224), mode='bicubic', antialias=True)
         else:
             raise ValueError(f'Invalid resize mode "{self.resize_mode}"')
@@ -79,18 +83,20 @@ class DINOv2Detector(Detector):
         # Run DINOv2 model.
         return self.model.to(x.device)(x)
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Metric specifications.
+
 
 metric_specs = {
     'fid':          dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=InceptionV3Detector)),
     'fd_dinov2':    dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=DINOv2Detector)),
 }
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Get feature detector for the given metric.
 
 _detector_cache = dict()
+
 
 def get_detector(metric, verbose=True):
     # Lookup from cache.
@@ -114,19 +120,21 @@ def get_detector(metric, verbose=True):
         torch.distributed.barrier()
     return detector
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Load feature statistics from the given .pkl or .npz file.
+
 
 def load_stats(path, verbose=True):
     if verbose:
         print(f'Loading feature statistics from {path} ...')
     with dnnlib.util.open_url(path, verbose=verbose) as f:
-        if path.lower().endswith('.npz'): # backwards compatibility with https://github.com/NVlabs/edm
+        if path.lower().endswith('.npz'):  # backwards compatibility with https://github.com/NVlabs/edm
             return {'fid': dict(np.load(f))}
         return pickle.load(f)
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Save feature statistics to the given .pkl file.
+
 
 def save_stats(stats, path, verbose=True):
     if verbose:
@@ -136,17 +144,18 @@ def save_stats(stats, path, verbose=True):
     with open(path, 'wb') as f:
         pickle.dump(stats, f)
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Calculate feature statistics for the given image batches
 # in a distributed fashion. Returns an iterable that yields
 # dnnlib.EasyDict(stats, images, batch_idx, num_batches)
 
+
 def calculate_stats_for_iterable(
     image_iter,                         # Iterable of image batches: NCHW, uint8, 3 channels.
-    metrics     = ['fid', 'fd_dinov2'], # Metrics to compute the statistics for.
-    verbose     = True,                 # Enable status prints?
-    dest_path   = None,                 # Where to save the statistics. None = do not save.
-    device      = torch.device('cuda'), # Which compute device to use.
+    metrics=['fid', 'fd_dinov2'],  # Metrics to compute the statistics for.
+    verbose=True,                 # Enable status prints?
+    dest_path=None,                 # Where to save the statistics. None = do not save.
+    device=torch.device('cuda'),  # Which compute device to use.
 ):
     # Initialize.
     num_batches = len(image_iter)
@@ -174,9 +183,9 @@ def calculate_stats_for_iterable(
 
             # Loop over batches.
             for batch_idx, images in enumerate(image_iter):
-                if isinstance(images, dict) and 'images' in images: # dict(images)
+                if isinstance(images, dict) and 'images' in images:  # dict(images)
                     images = images['images']
-                elif isinstance(images, (tuple, list)) and len(images) == 2: # (images, labels)
+                elif isinstance(images, (tuple, list)) and len(images) == 2:  # (images, labels)
                     images = images[0]
                 images = torch.as_tensor(images).to(device)
 
@@ -204,19 +213,21 @@ def calculate_stats_for_iterable(
 
     return StatsIterable()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Calculate feature statistics for the given directory or ZIP of images
 # in a distributed fashion. Returns an iterable that yields
 # dnnlib.EasyDict(stats, images, batch_idx, num_batches)
 
+
 def calculate_stats_for_files(
     image_path,             # Path to a directory or ZIP file containing the images.
-    num_images      = None, # Number of images to use. None = all available images.
-    seed            = 0,    # Random seed for selecting the images.
-    max_batch_size  = 64,   # Maximum batch size.
-    num_workers     = 2,    # How many subprocesses to use for data loading.
-    prefetch_factor = 2,    # Number of images loaded in advance by each worker.
-    verbose         = True, # Enable status prints?
+    num_images=None,  # Number of images to use. None = all available images.
+    seed=0,    # Random seed for selecting the images.
+    max_batch_size=64,   # Maximum batch size.
+    num_workers=2,    # How many subprocesses to use for data loading.
+    prefetch_factor=2,    # Number of images loaded in advance by each worker.
+    verbose=True,  # Enable status prints?
+    resolution=512,  # default res
     **stats_kwargs,         # Arguments for calculate_stats_for_iterable().
 ):
     # Rank 0 goes first.
@@ -226,7 +237,7 @@ def calculate_stats_for_files(
     # List images.
     if verbose:
         dist.print0(f'Loading images from {image_path} ...')
-    dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_images, random_seed=seed)
+    dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_images, random_seed=seed, resolution=resolution)
     if num_images is not None and len(dataset_obj) < num_images:
         raise click.ClickException(f'Found {len(dataset_obj)} images, but expected at least {num_images}')
     if len(dataset_obj) < 2:
@@ -238,42 +249,53 @@ def calculate_stats_for_files(
 
     # Divide images into batches.
     num_batches = max((len(dataset_obj) - 1) // (max_batch_size * dist.get_world_size()) + 1, 1) * dist.get_world_size()
-    rank_batches = np.array_split(np.arange(len(dataset_obj)), num_batches)[dist.get_rank() :: dist.get_world_size()]
+    rank_batches = np.array_split(np.arange(len(dataset_obj)), num_batches)[dist.get_rank():: dist.get_world_size()]
     data_loader = torch.utils.data.DataLoader(dataset_obj, batch_sampler=rank_batches,
-        num_workers=num_workers, prefetch_factor=(prefetch_factor if num_workers > 0 else None))
+                                              num_workers=num_workers, prefetch_factor=(prefetch_factor if num_workers > 0 else None))
 
     # Return an interable for calculating the statistics.
     return calculate_stats_for_iterable(image_iter=data_loader, verbose=verbose, **stats_kwargs)
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Calculate metrics based on the given feature statistics.
+
 
 def calculate_metrics_from_stats(
     stats,                          # Feature statistics of the generated images.
     ref,                            # Reference statistics of the dataset. Can be a path or URL.
-    metrics = ['fid', 'fd_dinov2'], # List of metrics to compute.
-    verbose = True,                 # Enable status prints?
+    metrics=['fid', 'fd_dinov2'],  # List of metrics to compute.
+    verbose=True,                 # Enable status prints?
 ):
-    if isinstance(ref, str):
-        ref = load_stats(ref, verbose=verbose)
-    results = dict()
-    for metric in metrics:
-        if metric not in stats or metric not in ref:
+    L_ref = ref
+    all_results = {'features': dict(), 'metrics': dict()}
+    for ref in L_ref:
+        results = dict()
+        # Add an if elif for numa compute TODO
+        if isinstance(ref, str):
+            name = os.path.splitext(os.path.basename(ref))[0]
+            ref = load_stats(ref, verbose=verbose)
+        for metric in metrics:
+            if metric not in all_results['features']:
+                all_results['features'][metric] = {'mean': stats[metric]['mu'], 'sigma': stats[metric]['sigma']}
+            if metric not in stats or metric not in ref:
+                if verbose:
+                    print(f'No statistics computed for {metric} -- skipping.')
+                continue
             if verbose:
-                print(f'No statistics computed for {metric} -- skipping.')
-            continue
-        if verbose:
-            print(f'Calculating {metric}...')
-        m = np.square(stats[metric]['mu'] - ref[metric]['mu']).sum()
-        s, _ = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']), disp=False)
-        value = float(np.real(m + np.trace(stats[metric]['sigma'] + ref[metric]['sigma'] - s * 2)))
-        results[metric] = value
-        if verbose:
-            print(f'{metric} = {value:g}')
-    return results
+                print(f'Calculating {metric}...')
+            m = np.square(stats[metric]['mu'] - ref[metric]['mu']).sum()
+            s, _ = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']), disp=False)
+            value = float(np.real(m + np.trace(stats[metric]['sigma'] + ref[metric]['sigma'] - s * 2)))
+            results[metric] = value
+            if verbose:
+                print(f'{metric} = {value:g}')
+            all_results['metrics'][name] = results
 
-#----------------------------------------------------------------------------
+    return all_results
+
+# ----------------------------------------------------------------------------
 # Parse a comma separated list of strings.
+
 
 def parse_metric_list(s):
     metrics = s if isinstance(s, list) else s.split(',')
@@ -282,8 +304,9 @@ def parse_metric_list(s):
             raise click.ClickException(f'Invalid metric "{metric}"')
     return metrics
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # Main command line.
+
 
 @click.group()
 def cmdline():
@@ -314,33 +337,41 @@ def cmdline():
         --dest=fid-refs/my-dataset.pkl
     """
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # 'calc' subcommand.
+
 
 @cmdline.command()
 @click.option('--images', 'image_path',     help='Path to the images', metavar='PATH|ZIP',                  type=str, required=True)
-@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True)
+@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True, multiple=True)
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',              type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--num', 'num_images',        help='Number of images to use', metavar='INT',                  type=click.IntRange(min=2), default=50000, show_default=True)
 @click.option('--seed',                     help='Random seed for selecting the images', metavar='INT',     type=int, default=0, show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=64, show_default=True)
 @click.option('--workers', 'num_workers',   help='Subprocesses to use for data loading', metavar='INT',     type=click.IntRange(min=0), default=2, show_default=True)
-
-def calc(ref_path, metrics, **opts):
+@click.option('--out', 'out_file',          help='Output file', metavar='PATH',                             type=str, default=None)
+def calc(ref_path, metrics, out_file=None, **opts):
     """Calculate metrics for a given set of images."""
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
     if dist.get_rank() == 0:
-        ref = load_stats(path=ref_path) # do this first, just in case it fails
+        for path in ref_path:
+            load_stats(path=path)  # do this first, just in case it fails
     stats_iter = calculate_stats_for_files(metrics=metrics, **opts)
     for r in tqdm.tqdm(stats_iter, unit='batch', disable=(dist.get_rank() != 0)):
         pass
     if dist.get_rank() == 0:
-        calculate_metrics_from_stats(stats=r.stats, ref=ref, metrics=metrics)
+        result = calculate_metrics_from_stats(stats=r.stats, ref=ref_path, metrics=metrics)
+        if out_file is not None:
+            with open(out_file+'.json', 'w') as f:
+                json.dump(result['metrics'], f)
+            with open(out_file+'.pkl', 'wb') as f:
+                pickle.dump(result['features'], f)
     torch.distributed.barrier()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # 'gen' subcommand.
+
 
 @cmdline.command()
 @click.option('--net',                      help='Network pickle filename', metavar='PATH|URL',             type=str, required=True)
@@ -349,12 +380,11 @@ def calc(ref_path, metrics, **opts):
 @click.option('--num', 'num_images',        help='Number of images to generate', metavar='INT',             type=click.IntRange(min=2), default=50000, show_default=True)
 @click.option('--seed',                     help='Random seed for the first image', metavar='INT',          type=int, default=0, show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=32, show_default=True)
-
 def gen(net, ref_path, metrics, num_images, seed, **opts):
     """Calculate metrics for a given model using default sampler settings."""
     dist.init()
     if dist.get_rank() == 0:
-        ref = load_stats(path=ref_path) # do this first, just in case it fails
+        ref = load_stats(path=ref_path)  # do this first, just in case it fails
     image_iter = generate_images.generate_images(net=net, seeds=range(seed, seed + num_images), **opts)
     stats_iter = calculate_stats_for_iterable(image_iter, metrics=metrics)
     for r in tqdm.tqdm(stats_iter, unit='batch', disable=(dist.get_rank() != 0)):
@@ -363,8 +393,9 @@ def gen(net, ref_path, metrics, num_images, seed, **opts):
         calculate_metrics_from_stats(stats=r.stats, ref=ref, metrics=metrics)
     torch.distributed.barrier()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 # 'ref' subcommand.
+
 
 @cmdline.command()
 @click.option('--data', 'image_path',       help='Path to the dataset', metavar='PATH|ZIP',             type=str, required=True)
@@ -372,7 +403,6 @@ def gen(net, ref_path, metrics, num_images, seed, **opts):
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',          type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                   type=click.IntRange(min=1), default=64, show_default=True)
 @click.option('--workers', 'num_workers',   help='Subprocesses to use for data loading', metavar='INT', type=click.IntRange(min=0), default=2, show_default=True)
-
 def ref(**opts):
     """Calculate dataset reference statistics for 'calc' and 'gen'."""
     torch.multiprocessing.set_start_method('spawn')
@@ -381,9 +411,10 @@ def ref(**opts):
     for _r in tqdm.tqdm(stats_iter, unit='batch', disable=(dist.get_rank() != 0)):
         pass
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
 
 if __name__ == "__main__":
     cmdline()
 
-#----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
