@@ -20,6 +20,25 @@ try:
 except ImportError:
     pyspng = None
 
+# ---------------------------------------------------------------------------
+# Preprocessing if needed:
+
+
+class CenterCropImagenet:
+    def __init__(self, size):
+        self.size = size
+
+    def __call__(self, img):
+        img = np.transpose(img, (1, 2, 0))  # CHW → HWC
+        p = PIL.Image.fromarray(img)
+        while min(*p.size) >= 2 * self.size:
+            p = p.resize((p.size[0]//2, p.size[1]//2), PIL.Image.Resampling.BOX)
+        scale = self.size / min(*p.size)
+        p = p.resize((round(p.size[0]*scale), round(p.size[1]*scale)), PIL.Image.Resampling.BICUBIC)
+        arr = np.array(p)
+        y, x = (arr.shape[0] - self.size) // 2, (arr.shape[1] - self.size) // 2
+        return np.transpose(arr[y:y+self.size, x:x+self.size], (2, 0, 1))
+
 # ----------------------------------------------------------------------------
 # Abstract base class for datasets.
 
@@ -33,6 +52,7 @@ class Dataset(torch.utils.data.Dataset):
                  xflip=False,    # Artificially double the size of the dataset via x-flips. Applied after max_size.
                  random_seed=0,        # Random seed to use when applying max_size.
                  cache=False,    # Cache images in CPU memory?
+                 preprocess=None,
                  ):
         self._name = name
         self._raw_shape = list(raw_shape)
@@ -41,6 +61,7 @@ class Dataset(torch.utils.data.Dataset):
         self._cached_images = dict()  # {raw_idx: np.ndarray, ...}
         self._raw_labels = None
         self._label_shape = None
+        self._preprocess = preprocess
 
         # Apply max_size.
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
@@ -93,6 +114,8 @@ class Dataset(torch.utils.data.Dataset):
         image = self._cached_images.get(raw_idx, None)
         if image is None:
             image = self._load_raw_image(raw_idx)
+            if self._preprocess is not None:
+                image = self._preprocess(image)
             if self._cache:
                 self._cached_images[raw_idx] = image
         assert isinstance(image, np.ndarray)
@@ -167,7 +190,7 @@ class Dataset(torch.utils.data.Dataset):
 class ImageFolderDataset(Dataset):
     def __init__(self,
                  path,                   # Path to directory or zip.
-                 resolution=None,  # Ensure specific resolution, None = anything goes.
+                 resolution=None,        # Ensure specific resolution, None = anything goes.
                  **super_kwargs,         # Additional arguments for the Dataset base class.
                  ):
         self._path = path
@@ -190,9 +213,12 @@ class ImageFolderDataset(Dataset):
 
         name = os.path.splitext(os.path.basename(self._path))[0]
         raw_shape = [len(self._image_fnames)] + list(self._load_raw_image(0).shape)
+        preprocess = None
         if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
-            raise IOError('Image files do not match the specified resolution')
-        super().__init__(name=name, raw_shape=raw_shape, **super_kwargs)
+            preprocess = CenterCropImagenet(resolution)
+            raw_shape = [len(self._image_fnames), 3, resolution, resolution]
+            # raise IOError('Image files do not match the specified resolution')
+        super().__init__(name=name, raw_shape=raw_shape, preprocess=preprocess, **super_kwargs)
 
     @staticmethod
     def _file_ext(fname):

@@ -20,6 +20,7 @@ from torch_utils import distributed as dist
 from torch_utils import misc
 from training import dataset
 import generate_images
+import json
 
 # ----------------------------------------------------------------------------
 # Abstract base class for feature detectors.
@@ -226,6 +227,7 @@ def calculate_stats_for_files(
     num_workers=2,    # How many subprocesses to use for data loading.
     prefetch_factor=2,    # Number of images loaded in advance by each worker.
     verbose=True,  # Enable status prints?
+    resolution=512,  # default res
     **stats_kwargs,         # Arguments for calculate_stats_for_iterable().
 ):
     # Rank 0 goes first.
@@ -235,7 +237,7 @@ def calculate_stats_for_files(
     # List images.
     if verbose:
         dist.print0(f'Loading images from {image_path} ...')
-    dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_images, random_seed=seed)
+    dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_images, random_seed=seed, resolution=resolution)
     if num_images is not None and len(dataset_obj) < num_images:
         raise click.ClickException(f'Found {len(dataset_obj)} images, but expected at least {num_images}')
     if len(dataset_obj) < 2:
@@ -264,23 +266,30 @@ def calculate_metrics_from_stats(
     metrics=['fid', 'fd_dinov2'],  # List of metrics to compute.
     verbose=True,                 # Enable status prints?
 ):
-    if isinstance(ref, str):
-        ref = load_stats(ref, verbose=verbose)
-    results = dict()
-    for metric in metrics:
-        if metric not in stats or metric not in ref:
+    L_ref = ref
+    all_results = dict()
+    for ref in L_ref:
+        results = dict()
+        # Add an if elif for numa compute TODO
+        if isinstance(ref, str):
+            name = os.path.splitext(os.path.basename(ref))[0]
+            ref = load_stats(ref, verbose=verbose)
+        for metric in metrics:
+            if metric not in stats or metric not in ref:
+                if verbose:
+                    print(f'No statistics computed for {metric} -- skipping.')
+                continue
             if verbose:
-                print(f'No statistics computed for {metric} -- skipping.')
-            continue
-        if verbose:
-            print(f'Calculating {metric}...')
-        m = np.square(stats[metric]['mu'] - ref[metric]['mu']).sum()
-        s, _ = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']), disp=False)
-        value = float(np.real(m + np.trace(stats[metric]['sigma'] + ref[metric]['sigma'] - s * 2)))
-        results[metric] = value
-        if verbose:
-            print(f'{metric} = {value:g}')
-    return results
+                print(f'Calculating {metric}...')
+            m = np.square(stats[metric]['mu'] - ref[metric]['mu']).sum()
+            s, _ = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']), disp=False)
+            value = float(np.real(m + np.trace(stats[metric]['sigma'] + ref[metric]['sigma'] - s * 2)))
+            results[metric] = value
+            if verbose:
+                print(f'{metric} = {value:g}')
+            all_results[name] = results
+
+    return all_results
 
 # ----------------------------------------------------------------------------
 # Parse a comma separated list of strings.
@@ -332,23 +341,28 @@ def cmdline():
 
 @cmdline.command()
 @click.option('--images', 'image_path',     help='Path to the images', metavar='PATH|ZIP',                  type=str, required=True)
-@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True)
+@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True, multiple=True)
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',              type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--num', 'num_images',        help='Number of images to use', metavar='INT',                  type=click.IntRange(min=2), default=50000, show_default=True)
 @click.option('--seed',                     help='Random seed for selecting the images', metavar='INT',     type=int, default=0, show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=64, show_default=True)
 @click.option('--workers', 'num_workers',   help='Subprocesses to use for data loading', metavar='INT',     type=click.IntRange(min=0), default=2, show_default=True)
-def calc(ref_path, metrics, **opts):
+@click.option('--out', 'out_file',          help='Output file', metavar='JSON',                             type=str, default=None)
+def calc(ref_path, metrics, out_file=None, **opts):
     """Calculate metrics for a given set of images."""
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
     if dist.get_rank() == 0:
-        ref = load_stats(path=ref_path)  # do this first, just in case it fails
+        for path in ref_path:
+            load_stats(path=path)  # do this first, just in case it fails
     stats_iter = calculate_stats_for_files(metrics=metrics, **opts)
     for r in tqdm.tqdm(stats_iter, unit='batch', disable=(dist.get_rank() != 0)):
         pass
     if dist.get_rank() == 0:
-        calculate_metrics_from_stats(stats=r.stats, ref=ref, metrics=metrics)
+        result = calculate_metrics_from_stats(stats=r.stats, ref=ref_path, metrics=metrics)
+        if out_file is not None:
+            with open(out_file, 'w') as f:
+                json.dump(result, f)
     torch.distributed.barrier()
 
 # ----------------------------------------------------------------------------
