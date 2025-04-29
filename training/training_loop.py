@@ -83,6 +83,11 @@ def training_loop(
     force_finite=True,     # Get rid of NaN/Inf gradients before feeding them to the optimizer.
     cudnn_benchmark=True,     # Enable torch.backends.cudnn.benchmark?
     device=torch.device('cuda'),
+
+    # New parameters for gradient clipping and network freezing
+    max_grad_norm=1.0,     # Maximum gradient norm for clipping. 0 = disable.
+    freeze_down=True,      # Freeze UNet downsampling blocks
+    freeze_attn=False,     # Freeze UNet attention blocks
 ):
     # Initialize.
     prev_status_time = time.time()
@@ -133,6 +138,13 @@ def training_loop(
             torch.ones([batch_gpu], device=device),
             torch.zeros([batch_gpu, net.label_dim], device=device),
         ], max_nesting=2)
+    # After loading the network and before setting up DDP:
+    if freeze_down or freeze_attn:
+        for name, param in net.unet.named_parameters():
+            if (freeze_down and 'down' in name) or (freeze_attn and 'attn' in name):
+                param.requires_grad = False
+                if dist.get_rank() == 0:
+                    dist.print0(f'Frozen parameter: {name}')
 
     # Setup training state.
     dist.print0('Setting up training state...')
@@ -238,6 +250,24 @@ def training_loop(
                 loss = loss_fn(net=ddp, images=images, labels=labels.to(device))
                 training_stats.report('Loss/loss', loss)
                 loss.sum().mul(loss_scaling / batch_gpu_total).backward()
+
+        # After loss.backward() but before optimizer.step():
+        if max_grad_norm > 0:
+            # Compute gradient norm on all ranks
+            grad_norm = torch.nn.utils.clip_grad_norm_(net.parameters(), float('inf'))
+            # Synchronize grad norm across ranks
+            if dist.get_world_size() > 1:
+                grad_norm = grad_norm.to(device)
+                torch.distributed.all_reduce(grad_norm)
+                grad_norm = grad_norm / dist.get_world_size()
+            # Report the synchronized gradient norm
+            training_stats.report('Loss/grad_norm', grad_norm)
+            # Now do the actual clipping
+            if grad_norm > max_grad_norm:
+                clip_coef = max_grad_norm / (grad_norm + 1e-6)
+                for param in net.parameters():
+                    if param.grad is not None:
+                        param.grad.detach().mul_(clip_coef)
 
         # Run optimizer and update weights.
         lr = dnnlib.util.call_func_by_name(cur_nimg=state.cur_nimg, batch_size=batch_size, **lr_kwargs)

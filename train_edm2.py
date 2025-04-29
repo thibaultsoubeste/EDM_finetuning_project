@@ -94,7 +94,12 @@ def setup_training_config(preset='edm2-img512-s', **opts):
     c.update(total_nimg=opts.duration, batch_size=opts.batch)
     c.network_kwargs = dnnlib.EasyDict(class_name='training.networks_edm2.Precond', model_channels=opts.channels, dropout=opts.dropout)
     c.loss_kwargs = dnnlib.EasyDict(class_name='training.training_loop.EDM2Loss', P_mean=opts.P_mean, P_std=opts.P_std)
-    c.lr_kwargs = dnnlib.EasyDict(func_name='training.training_loop.learning_rate_schedule', ref_lr=opts.lr, ref_batches=opts.decay)
+    c.lr_kwargs = dnnlib.EasyDict(
+        func_name='training.training_loop.learning_rate_schedule',
+        ref_lr=opts.lr,
+        ref_batches=opts.decay,
+        rampup_Mimg=opts.rampup
+    )
 
     # Performance-related options.
     c.batch_gpu = opts.get('batch_gpu', 0) or None
@@ -107,6 +112,12 @@ def setup_training_config(preset='edm2-img512-s', **opts):
     c.snapshot_nimg = opts.get('snapshot', 0) or None
     c.checkpoint_nimg = opts.get('checkpoint', 0) or None
     c.seed = opts.get('seed', 0)
+
+    # New options for gradient clipping and network freezing
+    c.max_grad_norm = opts.get('max_grad_norm', 1.0)
+    c.freeze_down = opts.get('freeze_down', True)
+    c.freeze_attn = opts.get('freeze_attn', False)
+
     return c
 
 # ----------------------------------------------------------------------------
@@ -201,6 +212,7 @@ def parse_int_list(s):
 @click.option('--P_std', 'P_std',   help='Noise level standard deviation', metavar='FLOAT',     type=click.FloatRange(min=0, min_open=True), default=None)
 @click.option('--lr',               help='Learning rate max. (alpha_ref)', metavar='FLOAT',     type=click.FloatRange(min=0, min_open=True), default=None)
 @click.option('--decay',            help='Learning rate decay (t_ref)', metavar='BATCHES',      type=click.FloatRange(min=0), default=None)
+@click.option('--rampup',           help='Learning rate warmup in Mimg', metavar='FLOAT',       type=click.FloatRange(min=0), default=0, show_default=True)
 # Performance-related options.
 @click.option('--batch-gpu',        help='Limit batch size per GPU', metavar='NIMG',            type=parse_nimg, default=0, show_default=True)
 @click.option('--fp16',             help='Enable mixed-precision training', metavar='BOOL',     type=bool, default=True, show_default=True)
@@ -211,6 +223,10 @@ def parse_int_list(s):
 @click.option('--snapshot',         help='Interval of network snapshots', metavar='NIMG',       type=parse_nimg, default='8Mi', show_default=True)
 @click.option('--checkpoint',       help='Interval of training checkpoints', metavar='NIMG',    type=parse_nimg, default='128Mi', show_default=True)
 @click.option('--seed',             help='Random seed', metavar='INT',                          type=int, default=0, show_default=True)
+# New options for gradient clipping and network freezing
+@click.option('--max-grad-norm',    help='Maximum gradient norm for clipping', metavar='FLOAT', type=click.FloatRange(min=0), default=1.0, show_default=True)
+@click.option('--freeze-down',      help='Freeze UNet downsampling blocks', metavar='BOOL',     type=bool, default=True, show_default=True)
+@click.option('--freeze-attn',      help='Freeze UNet attention blocks', metavar='BOOL',        type=bool, default=False, show_default=True)
 @click.option('-n', '--dry-run',    help='Print training options and exit',                     is_flag=True)
 def cmdline(outdir, dry_run, **opts):
     """Train diffusion models according to the EDM2 recipe from the paper
@@ -250,4 +266,4 @@ if __name__ == "__main__":
 # python Diffusion_finetuning_project/dataset_tool.py encode --source=dataset2 --dest=dataset2_latent
 # """torchrun --standalone --nproc_per_node=1 Diffusion_finetuning_project/train_edm2.py --outdir=out/temp/training-runs --data=img512-sd.zip --preset=base-finetuning --batch-gpu=16 --model2finetune=checkpoints/edm2-img512-xxs/edm2-img512-xxs-2147483-0.100.pkl"""
 # """torchrun --standalone --nproc_per_node=1 ?"""
-# """python Diffusion_finetuning_project/train_edm2.py --outdir=out/temp/training-runs --data=dataset2_latent --preset=base-finetuning --batch-gpu=32 --status=256 --model2finetune=checkpoints/edm2-img512-xxs/edm2-img512-xxs-2147483-0.100.pkl"""
+# """python Diffusion_finetuning_project/train_edm2.py --outdir=out/temp/training-runs --data=datasetMichel --preset=base-finetuning --top-percent=5 --batch=32 --lr=0.005 --rampup=0.5 --batch-gpu=32 --model2finetune=checkpoints/edm2-img512-xxs/edm2-img512-xxs-2147483-0.100.pkl --status=256 --snapshot=256Ki --checkpoint=64Mi --duration=2Mi"""
