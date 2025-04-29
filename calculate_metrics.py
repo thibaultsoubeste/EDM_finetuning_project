@@ -267,7 +267,7 @@ def calculate_metrics_from_stats(
     verbose=True,                 # Enable status prints?
 ):
     L_ref = ref
-    all_results = dict()
+    all_results = {'features': dict(), 'metrics': dict()}
     for ref in L_ref:
         results = dict()
         # Add an if elif for numa compute TODO
@@ -275,6 +275,8 @@ def calculate_metrics_from_stats(
             name = os.path.splitext(os.path.basename(ref))[0]
             ref = load_stats(ref, verbose=verbose)
         for metric in metrics:
+            if metric not in all_results['features']:
+                all_results['features'][metric] = {'mean': stats[metric]['mu'], 'sigma': stats[metric]['sigma']}
             if metric not in stats or metric not in ref:
                 if verbose:
                     print(f'No statistics computed for {metric} -- skipping.')
@@ -287,7 +289,7 @@ def calculate_metrics_from_stats(
             results[metric] = value
             if verbose:
                 print(f'{metric} = {value:g}')
-            all_results[name] = results
+            all_results['metrics'][name] = results
 
     return all_results
 
@@ -347,7 +349,7 @@ def cmdline():
 @click.option('--seed',                     help='Random seed for selecting the images', metavar='INT',     type=int, default=0, show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=64, show_default=True)
 @click.option('--workers', 'num_workers',   help='Subprocesses to use for data loading', metavar='INT',     type=click.IntRange(min=0), default=2, show_default=True)
-@click.option('--out', 'out_file',          help='Output file', metavar='JSON',                             type=str, default=None)
+@click.option('--out', 'out_file',          help='Output file', metavar='PATH',                             type=str, default=None)
 def calc(ref_path, metrics, out_file=None, **opts):
     """Calculate metrics for a given set of images."""
     torch.multiprocessing.set_start_method('spawn')
@@ -361,8 +363,10 @@ def calc(ref_path, metrics, out_file=None, **opts):
     if dist.get_rank() == 0:
         result = calculate_metrics_from_stats(stats=r.stats, ref=ref_path, metrics=metrics)
         if out_file is not None:
-            with open(out_file, 'w') as f:
-                json.dump(result, f)
+            with open(out_file+'.json', 'w') as f:
+                json.dump(result['metrics'], f)
+            with open(out_file+'.pkl', 'wb') as f:
+                pickle.dump(result['features'], f)
     torch.distributed.barrier()
 
 # ----------------------------------------------------------------------------
