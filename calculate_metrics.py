@@ -375,22 +375,29 @@ def calc(ref_path, metrics, out_file=None, **opts):
 
 @cmdline.command()
 @click.option('--net',                      help='Network pickle filename', metavar='PATH|URL',             type=str, required=True)
-@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True)
+@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True, multiple=True)
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',              type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--num', 'num_images',        help='Number of images to generate', metavar='INT',             type=click.IntRange(min=2), default=50000, show_default=True)
 @click.option('--seed',                     help='Random seed for the first image', metavar='INT',          type=int, default=0, show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=32, show_default=True)
-def gen(net, ref_path, metrics, num_images, seed, **opts):
+@click.option('--out', 'out_file',          help='Output file', metavar='PATH',                             type=str, default=None)
+def gen(net, ref_path, metrics, num_images, out_file, seed, **opts):
     """Calculate metrics for a given model using default sampler settings."""
     dist.init()
     if dist.get_rank() == 0:
-        ref = load_stats(path=ref_path)  # do this first, just in case it fails
+        for path in ref_path:
+            load_stats(path=path)  # do this first, just to prevent generating for nothing, the ref will be reloaded though
     image_iter = generate_images.generate_images(net=net, seeds=range(seed, seed + num_images), **opts)
     stats_iter = calculate_stats_for_iterable(image_iter, metrics=metrics)
     for r in tqdm.tqdm(stats_iter, unit='batch', disable=(dist.get_rank() != 0)):
         pass
     if dist.get_rank() == 0:
-        calculate_metrics_from_stats(stats=r.stats, ref=ref, metrics=metrics)
+        result = calculate_metrics_from_stats(stats=r.stats, ref=ref_path, metrics=metrics)
+        if out_file is not None:
+            with open(out_file+'.json', 'w') as f:
+                json.dump(result['metrics'], f)
+            with open(out_file+'.pkl', 'wb') as f:
+                pickle.dump(result['features'], f)
     torch.distributed.barrier()
 
 # ----------------------------------------------------------------------------
