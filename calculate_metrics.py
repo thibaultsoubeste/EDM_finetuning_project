@@ -34,6 +34,24 @@ class Detector:
         raise NotImplementedError  # to be overridden by subclass
 
 # ----------------------------------------------------------------------------
+# Example Scorer detector.
+
+
+class Scorer(Detector):
+    def __init__(self):
+        super().__init__(feature_dim=1)  # 1 dimension of scoring (we could modify it later to take into account multiple dimension, like for CLIP which can grade AESthetic or whatever)
+        self.max_score = 10  # would be best if you could rescale the score to a 1to10
+        # load your model there
+        # url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
+        # with dnnlib.util.open_url(url, verbose=False) as f:
+        #     self.model = pickle.load(f)
+        # Might be required to put a .eval on the model
+
+    def __call__(self, x):
+        return self.model.to(x.device)(x)  # if logits then return the predicted value and not the logits, I think it handles not integer scores
+
+
+# ----------------------------------------------------------------------------
 # InceptionV3 feature detector.
 # This is a direct PyTorch translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
 
@@ -179,6 +197,8 @@ def calculate_stats_for_iterable(
             for s in state:
                 s.cum_mu = torch.zeros([s.detector.feature_dim], dtype=torch.float64, device=device)
                 s.cum_sigma = torch.zeros([s.detector.feature_dim, s.detector.feature_dim], dtype=torch.float64, device=device)
+                if s.metric not in ['fid', 'fd_dinov2']:
+                    s.histogram = torch.zeros([s.detector.max_score], dtype=torch.float64, device=device)
             cum_images = torch.zeros([], dtype=torch.int64, device=device)
 
             # Loop over batches.
@@ -195,6 +215,10 @@ def calculate_stats_for_iterable(
                         features = s.detector(images).to(torch.float64)
                         s.cum_mu += features.sum(0)
                         s.cum_sigma += features.T @ features
+                        if s.metric not in ['fid', 'fd_dinov2']:
+                            rounded = torch.clamp(torch.round(features), 1, 10).to(torch.int64) - 1
+                            s.histogram += torch.bincount(rounded, minlength=10)
+
                     cum_images += images.shape[0]
 
                 # Output results.
@@ -206,7 +230,11 @@ def calculate_stats_for_iterable(
                     for s in state:
                         mu = all_reduce(s.cum_mu) / r.num_images
                         sigma = (all_reduce(s.cum_sigma) - mu.ger(mu) * r.num_images) / (r.num_images - 1)
-                        r.stats[s.metric] = dict(mu=mu.cpu().numpy(), sigma=sigma.cpu().numpy())
+                        result = dict(mu=mu.cpu().numpy(), sigma=sigma.cpu().numpy())
+                        if s.metric not in ['fid', 'fd_dinov2']:
+                            histogram = all_reduce(s.histogram)
+                            dict['histogram'] = histogram.cpu().numpy()
+                        r.stats[s.metric] = result
                     if dest_path is not None and dist.get_rank() == 0:
                         save_stats(stats=r.stats, path=dest_path, verbose=False)
                 yield r
@@ -278,29 +306,45 @@ def calculate_metrics_from_stats(
 ):
     L_ref = ref
     all_results = {'features': dict(), 'metrics': dict()}
-    for ref in L_ref:
-        results = dict()
-        # Add an if elif for numa compute TODO
-        if isinstance(ref, str):
-            name = os.path.splitext(os.path.basename(ref))[0]
-            ref = load_stats(ref, verbose=verbose)
-        for metric in metrics:
-            if metric not in all_results['features']:
-                all_results['features'][metric] = {'mean': stats[metric]['mu'], 'sigma': stats[metric]['sigma']}
-            if metric not in stats or metric not in ref:
-                if verbose:
-                    print(f'No statistics computed for {metric} -- skipping.')
-                continue
-            if verbose:
-                print(f'Calculating {metric}...')
-            m = np.square(stats[metric]['mu'] - ref[metric]['mu']).sum()
-            s, _ = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']), disp=False)
-            value = float(np.real(m + np.trace(stats[metric]['sigma'] + ref[metric]['sigma'] - s * 2)))
-            results[metric] = value
-            if verbose:
-                print(f'{metric} = {value:g}')
-            all_results['metrics'][name] = results
 
+    for metric in metrics:
+        if metric not in stats:
+            if verbose:
+                print(f'No statistics computed for {metric} -- skipping.')
+            continue
+        if verbose:
+            print(f'Calculating {metric}...')
+
+        results = dict()
+        if metric not in ['fid', 'fd_dinov2']:
+            m = stats[metric]['mu'].flatten()
+            s = stats[metric]['sigma'].flatten()
+            if m.size > 1 or s.size > 1:
+                if verbose:
+                    print(f"Error in shape for {metric}-- skipping. mu of shape {stats[metric]['mu'].shape} and signa of shape {stats[metric]['sigma'].shape}")
+                continue
+
+            histo = stats[metric]['histogram'].tolist()
+            results = dict(mu=m[0], sigma=s[0], histogram=histo)
+
+        else:
+            all_results['features'][metric] = {'mean': stats[metric]['mu'], 'sigma': stats[metric]['sigma']}
+            for ref in L_ref:
+                if isinstance(ref, str):
+                    name = os.path.splitext(os.path.basename(ref))[0]
+                    ref = load_stats(ref, verbose=verbose)
+                if metric not in ref:
+                    if verbose:
+                        print(f'No statistics computed for {metric} in {name} -- skipping.')
+                    continue
+
+                m = np.square(stats[metric]['mu'] - ref[metric]['mu']).sum()
+                s, _ = scipy.linalg.sqrtm(np.dot(stats[metric]['sigma'], ref[metric]['sigma']), disp=False)
+                value = float(np.real(m + np.trace(stats[metric]['sigma'] + ref[metric]['sigma'] - s * 2)))
+                results[name] = value
+                if verbose:
+                    print(f'{metric} on {name} = {value:g}')
+        all_results['metrics'][metric] = results
     return all_results
 
 # ----------------------------------------------------------------------------
@@ -353,7 +397,7 @@ def cmdline():
 
 @cmdline.command()
 @click.option('--images', 'image_path',     help='Path to the images', metavar='PATH|ZIP',                  type=str, required=True)
-@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True, multiple=True)
+@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, multiple=True)
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',              type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--num', 'num_images',        help='Number of images to use', metavar='INT',                  type=click.IntRange(min=2), default=50000, show_default=True)
 @click.option('--seed',                     help='Random seed for selecting the images', metavar='INT',     type=int, default=0, show_default=True)
@@ -385,7 +429,7 @@ def calc(ref_path, metrics, out_file=None, **opts):
 
 @cmdline.command()
 @click.option('--net',                      help='Network pickle filename', metavar='PATH|URL',             type=str, required=True)
-@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=True, multiple=True)
+@click.option('--ref', 'ref_path',          help='Dataset reference statistics ', metavar='PKL|NPZ|URL',    type=str, required=False, multiple=True)
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',              type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--num', 'num_images',        help='Number of images to generate', metavar='INT',             type=click.IntRange(min=2), default=50000, show_default=True)
 @click.option('--seed',                     help='Random seed for the first image', metavar='INT',          type=int, default=0, show_default=True)
