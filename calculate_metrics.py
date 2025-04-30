@@ -237,7 +237,17 @@ def calculate_stats_for_files(
     # List images.
     if verbose:
         dist.print0(f'Loading images from {image_path} ...')
-    dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_images, random_seed=seed, resolution=resolution)
+
+    filter_keys = ('nima_threshold', 'top_percent', 'top_per_category')
+    filter_args = {k: stats_kwargs[k] for k in filter_keys if stats_kwargs.get(k) is not None}
+    for k in filter_keys:
+        stats_kwargs.pop(k, None)
+
+    if filter_args:
+        dataset_obj = dataset.FilteredImageDataset(path=image_path, max_size=num_images, random_seed=seed, resolution=resolution, **filter_args)
+    else:
+        dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_images, random_seed=seed, resolution=resolution)
+
     if num_images is not None and len(dataset_obj) < num_images:
         raise click.ClickException(f'Found {len(dataset_obj)} images, but expected at least {num_images}')
     if len(dataset_obj) < 2:
@@ -410,6 +420,9 @@ def gen(net, ref_path, metrics, num_images, out_file, seed, **opts):
 @click.option('--metrics',                  help='List of metrics to compute', metavar='LIST',          type=parse_metric_list, default='fid,fd_dinov2', show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                   type=click.IntRange(min=1), default=64, show_default=True)
 @click.option('--workers', 'num_workers',   help='Subprocesses to use for data loading', metavar='INT', type=click.IntRange(min=0), default=2, show_default=True)
+@click.option('--nima-threshold',   help='Minimum NIMA score for images', metavar='FLOAT',      type=float, default=None, show_default=True)
+@click.option('--top-percent',      help='Keep top X% of images by NIMA score', metavar='FLOAT', type=float, default=None, show_default=True)
+@click.option('--top-per-category', help='Keep top X% of images in each category', metavar='FLOAT', type=float, default=None, show_default=True)
 def ref(**opts):
     """Calculate dataset reference statistics for 'calc' and 'gen'."""
     torch.multiprocessing.set_start_method('spawn')

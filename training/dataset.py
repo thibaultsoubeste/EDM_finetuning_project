@@ -301,6 +301,7 @@ class FilteredImageDataset(ImageFolderDataset):
         self._metadata = self._load_metadata()
         self._uniquelabels = np.sort([folder for folder in os.listdir(path) if os.path.isdir(os.path.join(path, folder))])
         self._labels2idxmapping = {foldername: idx for idx, foldername in enumerate(self._uniquelabels)}
+        self._extenstion = os.path.splitext(self._image_fnames[0])[1]
         if nima_threshold is not None or categories is not None or top_percent is not None or top_per_category is not None:
             self._filter_fnames(nima_threshold, categories, top_percent, top_per_category)
 
@@ -326,7 +327,7 @@ class FilteredImageDataset(ImageFolderDataset):
 
         for fname in self._image_fnames:
             rel_path = fname.replace('\\', '/')
-            meta = self._metadata.get(rel_path.replace('.npy', ''), {})
+            meta = self._metadata.get(rel_path.replace(self._extenstion, ''), {})
             # Check NIMA score
             if nima_threshold is not None:
                 nima_score = meta.get('nima', 0)
@@ -407,7 +408,7 @@ class FilteredImageDataset(ImageFolderDataset):
             return None
 
         # Match filenames
-        labels = [labels[fname.replace('\\', '/').replace('.npy', '')] for fname in self._image_fnames]
+        labels = [labels[fname.replace('\\', '/').replace(self._extenstion, '')] for fname in self._image_fnames]
         labels = np.array(labels)
         labels = np.vectorize(lambda x: self._labels2idxmapping[x])(labels)
         labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
