@@ -14,6 +14,7 @@ import PIL.Image
 import json
 import torch
 import dnnlib
+from torch_utils.distributed import print0
 
 try:
     import pyspng
@@ -29,6 +30,8 @@ class CenterCropImagenet:
         self.size = size
 
     def __call__(self, img):
+        if img.shape[1:] == (self.size, self.size):
+            return img
         img = np.transpose(img, (1, 2, 0))  # CHW → HWC
         if img.shape[2] == 1:
             img = img[:, :, 0]
@@ -118,10 +121,12 @@ class Dataset(torch.utils.data.Dataset):
             image = self._load_raw_image(raw_idx)
             if self._preprocess is not None:
                 image = self._preprocess(image)
+
             if self._cache:
                 self._cached_images[raw_idx] = image
         assert isinstance(image, np.ndarray)
-        assert list(image.shape) == self._raw_shape[1:]
+        assert list(image.shape) == self._raw_shape[1:], (f'image shape={list(image.shape)}, expected={self._raw_shape[1:]}, {idx=}, image name {self._image_fnames[raw_idx]}'
+                                                          )
         if self._xflip[idx]:
             assert image.ndim == 3  # CHW
             image = image[:, :, ::-1]
@@ -216,7 +221,7 @@ class ImageFolderDataset(Dataset):
         name = os.path.splitext(os.path.basename(self._path))[0]
         raw_shape = [len(self._image_fnames)] + list(self._load_raw_image(0).shape)
         preprocess = None
-        if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
+        if resolution is not None:
             preprocess = CenterCropImagenet(resolution)
             raw_shape = [len(self._image_fnames), 3, resolution, resolution]
             # raise IOError('Image files do not match the specified resolution')
@@ -381,6 +386,7 @@ class FilteredImageDataset(ImageFolderDataset):
 
         self._image_fnames = filtered_fnames
         self._raw_shape[0] = len(filtered_fnames)
+        print0(f'After filtration there are {self._raw_shape[0]} images in the dataset')
 
         # Update raw_idx to match new filtered size
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
