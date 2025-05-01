@@ -37,18 +37,38 @@ class Detector:
 # Example Scorer detector.
 
 
-class Scorer(Detector):
-    def __init__(self):
+class Nima(Detector):
+    def __init__(self, resize_mode='torch'):
+        self.resize_mode = resize_mode
         super().__init__(feature_dim=1)  # 1 dimension of scoring (we could modify it later to take into account multiple dimension, like for CLIP which can grade AESthetic or whatever)
         self.max_score = 10  # would be best if you could rescale the score to a 1to10
-        # load your model there
-        # url = 'https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl'
-        # with dnnlib.util.open_url(url, verbose=False) as f:
-        #     self.model = pickle.load(f)
+
+        url = 'https://huggingface.co/Thibaultsoubeste/nimascorer/resolve/main/nima_scorer.pt'
+        with dnnlib.util.open_url(url, verbose=False) as f:
+            self.model = torch.jit.load(f).eval()
         # Might be required to put a .eval on the model
 
+    @torch.no_grad
     def __call__(self, x):
-        return self.model.to(x.device)(x)  # if logits then return the predicted value and not the logits, I think it handles not integer scores
+        # Resize images.
+        if self.resize_mode == 'pil':  # Slow reference implementation that matches the original dgm-eval codebase exactly.
+            device = x.device
+            x = x.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+            x = np.stack([np.uint8(PIL.Image.fromarray(xx, 'RGB').resize((224, 224), PIL.Image.Resampling.BICUBIC)) for xx in x])
+            x = torch.from_numpy(x).permute(0, 3, 1, 2).to(device)
+        elif self.resize_mode == 'torch':  # Fast practical implementation that yields almost the same results.
+            x = torch.nn.functional.interpolate(x.to(torch.float32), size=(224, 224), mode='bicubic', antialias=True)
+        else:
+            raise ValueError(f'Invalid resize mode "{self.resize_mode}"')
+
+        # Adjust dynamic range.
+        x = x.to(torch.float32) / 255
+        x = x - misc.const_like(x, [0.485, 0.456, 0.406]).reshape(1, -1, 1, 1)
+        x = x / misc.const_like(x, [0.229, 0.224, 0.225]).reshape(1, -1, 1, 1)
+
+        dist = self.model.to(x.device)(x)
+        ratings = torch.arange(1, self.max_score+1, device=dist.device, dtype=dist.dtype)
+        return (dist * ratings).sum(dim=1, keepdim=True)
 
 
 # ----------------------------------------------------------------------------
@@ -108,6 +128,7 @@ class DINOv2Detector(Detector):
 metric_specs = {
     'fid':          dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=InceptionV3Detector)),
     'fd_dinov2':    dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=DINOv2Detector)),
+    'nima':    dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=Nima)),
 }
 
 # ----------------------------------------------------------------------------
@@ -217,7 +238,7 @@ def calculate_stats_for_iterable(
                         s.cum_sigma += features.T @ features
                         if s.metric not in ['fid', 'fd_dinov2']:
                             rounded = torch.clamp(torch.round(features), 1, 10).to(torch.int64) - 1
-                            s.histogram += torch.bincount(rounded, minlength=10)
+                            s.histogram += torch.bincount(rounded.squeeze(1), minlength=10)
 
                     cum_images += images.shape[0]
 
@@ -233,7 +254,7 @@ def calculate_stats_for_iterable(
                         result = dict(mu=mu.cpu().numpy(), sigma=sigma.cpu().numpy())
                         if s.metric not in ['fid', 'fd_dinov2']:
                             histogram = all_reduce(s.histogram)
-                            dict['histogram'] = histogram.cpu().numpy()
+                            result['histogram'] = histogram.cpu().numpy()
                         r.stats[s.metric] = result
                     if dest_path is not None and dist.get_rank() == 0:
                         save_stats(stats=r.stats, path=dest_path, verbose=False)
