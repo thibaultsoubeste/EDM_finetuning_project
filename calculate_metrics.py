@@ -7,6 +7,8 @@
 
 """Calculate evaluation metrics (FID and FD_DINOv2)."""
 
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import matplotlib.pyplot as plt
 import os
 import click
 import tqdm
@@ -217,7 +219,7 @@ def calculate_stats_for_iterable(
                 s.cum_mu = torch.zeros([s.detector.feature_dim], dtype=torch.float64, device=device)
                 s.cum_sigma = torch.zeros([s.detector.feature_dim, s.detector.feature_dim], dtype=torch.float64, device=device)
                 if s.metric not in ['fid', 'fd_dinov2']:
-                    s.histogram = torch.zeros([s.detector.max_score], dtype=torch.float64, device=device)
+                    s.histogram = torch.zeros([s.detector.max_score * 10], dtype=torch.float64, device=device)
             cum_images = torch.zeros([], dtype=torch.int64, device=device)
 
             # Loop over batches.
@@ -235,8 +237,8 @@ def calculate_stats_for_iterable(
                         s.cum_mu += features.sum(0)
                         s.cum_sigma += features.T @ features
                         if s.metric not in ['fid', 'fd_dinov2']:
-                            rounded = torch.clamp(torch.round(features), 1, 10).to(torch.int64) - 1
-                            s.histogram += torch.bincount(rounded.squeeze(1), minlength=10)
+                            rounded = torch.clamp(torch.round(features*10), 1, 10*s.detector.max_score).to(torch.int64) - 1
+                            s.histogram += torch.bincount(rounded.squeeze(1), minlength=10*s.detector.max_score)
 
                     cum_images += images.shape[0]
 
@@ -366,6 +368,35 @@ def calculate_metrics_from_stats(
         all_results['metrics'][metric] = results
     return all_results
 
+
+# ----------------------------------------------------------------------------
+# Visualization of the histogram
+
+
+def histogram(result, metric, save_file=None):
+    x = np.arange(0.1, 10.1, 0.1)
+    width = np.diff(x)[0]
+    # Main plot
+    plt.bar(x, result['histogram'], width=width, edgecolor='k')
+    plt.axvline(result['mu'], color='red', linewidth=1)
+    plt.xlim(3, 6.5)
+    # ax_inset.set_xticks([])
+    plt.title(f'Histogram of {metric} score')
+    plt.xlabel('Score')
+    plt.ylabel('Number of images')
+    plt.tight_layout()
+
+    # Inset
+    ax_inset = inset_axes(plt.gca(), width="40%", height="40%", loc='upper right')
+    ax_inset.bar(x, result['histogram'], width=width, edgecolor='k', linewidth=0.3)
+    ax_inset.axvline(result['mu'], color='red', linewidth=0.3)
+    ax_inset.patch.set_alpha(0.3)
+    ax_inset.set_yticks([])
+    if save_file is None:
+        plt.show(block=False)
+    else:
+        plt.savefig(save_file)
+
 # ----------------------------------------------------------------------------
 # Parse a comma separated list of strings.
 
@@ -423,7 +454,8 @@ def cmdline():
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=64, show_default=True)
 @click.option('--workers', 'num_workers',   help='Subprocesses to use for data loading', metavar='INT',     type=click.IntRange(min=0), default=2, show_default=True)
 @click.option('--out', 'out_file',          help='Output file', metavar='PATH',                             type=str, default=None)
-def calc(ref_path, metrics, out_file=None, **opts):
+@click.option('--hist',                     help='Whether we plot the histogram or not', metavar='PATH',    type=bool, is_flag=True)
+def calc(ref_path, metrics, hist, out_file=None, **opts):
     """Calculate metrics for a given set of images."""
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
@@ -440,6 +472,10 @@ def calc(ref_path, metrics, out_file=None, **opts):
                 json.dump(result['metrics'], f)
             with open(out_file+'.pkl', 'wb') as f:
                 pickle.dump(result['features'], f)
+            if hist:
+                for metric in metrics:
+                    if metric not in ['fid', 'fd_dinov2']:
+                        histogram(result['metrics'][metric], metric, save_file=out_file+'-'+metric)
     torch.distributed.barrier()
 
 # ----------------------------------------------------------------------------
@@ -454,7 +490,8 @@ def calc(ref_path, metrics, out_file=None, **opts):
 @click.option('--seed',                     help='Random seed for the first image', metavar='INT',          type=int, default=0, show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=32, show_default=True)
 @click.option('--out', 'out_file',          help='Output file', metavar='PATH',                             type=str, default=None)
-def gen(net, ref_path, metrics, num_images, out_file, seed, **opts):
+@click.option('--hist',                     help='Whether we plot the histogram or not', metavar='PATH',    type=bool, is_flag=True)
+def gen(net, ref_path, metrics, num_images, out_file, seed, hist, **opts):
     """Calculate metrics for a given model using default sampler settings."""
     dist.init()
     if dist.get_rank() == 0:
@@ -471,6 +508,10 @@ def gen(net, ref_path, metrics, num_images, out_file, seed, **opts):
                 json.dump(result['metrics'], f)
             with open(out_file+'.pkl', 'wb') as f:
                 pickle.dump(result['features'], f)
+            if hist:
+                for metric in metrics:
+                    if metric not in ['fid', 'fd_dinov2']:
+                        histogram(result['metrics'][metric], metric, save_file=out_file)
     torch.distributed.barrier()
 
 # ----------------------------------------------------------------------------
