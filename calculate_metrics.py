@@ -7,6 +7,7 @@
 
 """Calculate evaluation metrics (FID and FD_DINOv2)."""
 
+from torch import nn
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import matplotlib.pyplot as plt
 import os
@@ -36,12 +37,11 @@ class Detector:
         raise NotImplementedError  # to be overridden by subclass
 
 # ----------------------------------------------------------------------------
-# Example Scorer detector.
+# Nima Scorer detector.
 
 
 class Nima(Detector):
-    def __init__(self, resize_mode='torch'):
-        self.resize_mode = resize_mode
+    def __init__(self):
         super().__init__(feature_dim=1)  # 1 dimension of scoring (we could modify it later to take into account multiple dimension, like for CLIP which can grade AESthetic or whatever)
         self.max_score = 10  # would be best if you could rescale the score to a 1to10
 
@@ -52,19 +52,8 @@ class Nima(Detector):
 
     @torch.no_grad
     def __call__(self, x):
-        # Resize images.
-        if self.resize_mode == 'pil':  # Slow reference implementation that matches the original dgm-eval codebase exactly.
-            device = x.device
-            x = x.to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-            x = np.stack([np.uint8(PIL.Image.fromarray(xx, 'RGB').resize((224, 224), PIL.Image.Resampling.BICUBIC)) for xx in x])
-            x = torch.from_numpy(x).permute(0, 3, 1, 2).to(device)
-        elif self.resize_mode == 'torch':  # Fast practical implementation that yields almost the same results.
-            x = torch.nn.functional.interpolate(x.to(torch.float32), size=(224, 224), mode='bicubic', antialias=True)
-        else:
-            raise ValueError(f'Invalid resize mode "{self.resize_mode}"')
-
-        # Adjust dynamic range.
-        x = x.to(torch.float32) / 255  # Normalization is directly done in the model
+        x = torch.nn.functional.interpolate(x.to(torch.float32), size=(224, 224), mode='bicubic', antialias=True)
+        x = x.to(torch.float32) / 255
         x = x - misc.const_like(x, [0.485, 0.456, 0.406]).reshape(1, -1, 1, 1)
         x = x / misc.const_like(x, [0.229, 0.224, 0.225]).reshape(1, -1, 1, 1)
 
@@ -72,6 +61,50 @@ class Nima(Detector):
         ratings = torch.arange(1, self.max_score+1, device=dist.device, dtype=dist.dtype)
         return (dist * ratings).sum(dim=1, keepdim=True)
 
+# ----------------------------------------------------------------------------
+# LAION-Aesthetic-Predictor from Christophe Schuhmann.
+
+
+class AestheticHead(nn.Module):
+    def __init__(self, input_size):
+        super().__init__()
+        self.input_size = input_size
+        self.layers = nn.Sequential(
+            nn.Linear(self.input_size, 1024), nn.Dropout(0.2),
+            nn.Linear(1024, 128), nn.Dropout(0.2),
+            nn.Linear(128, 64), nn.Dropout(0.1),
+            nn.Linear(64, 16),
+            nn.Linear(16, 1)
+        )
+
+    def forward(self, x):
+        return self.layers(x)
+
+
+class AestheticPredictor(Detector):
+    def __init__(self):
+        super().__init__(feature_dim=1)  # 1 dimension of scoring (we could modify it later to take into account multiple dimension, like for CLIP which can grade AESthetic or whatever)
+        self.max_score = 10  # would be best if you could rescale the score to a 1to10
+        # import warnings
+        # warnings.filterwarnings('ignore', 'xFormers is not available')
+        torch.hub.set_dir(dnnlib.make_cache_dir_path('torch_hub'))
+        self.clip_features, _ = torch.hub.load("openai/CLIP", "_load", "ViT-L/14", trust_repo=True, verbose=False, skip_validation=True)
+        self.clip_features.eval().requires_grad_(False)
+        self.head = AestheticHead(768)
+        url = 'https://github.com/christophschuhmann/improved-aesthetic-predictor/raw/refs/heads/main/sac+logos+ava1-l14-linearMSE.pth'
+        with dnnlib.util.open_url(url, verbose=False) as f:
+            self.head.load_state_dict(torch.load(f))
+        self.head.eval().requires_grad_(False)
+
+    @torch.no_grad
+    def __call__(self, x):
+        x = torch.nn.functional.interpolate(x.to(torch.float32), size=(224, 224), mode='bicubic', antialias=True)
+        x = x.to(torch.float32) / 255
+        x = x - misc.const_like(x, [0.48145466, 0.4578275, 0.40821073]).reshape(1, -1, 1, 1)
+        x = x / misc.const_like(x, [0.26862954, 0.26130258, 0.27577711]).reshape(1, -1, 1, 1)
+        x = self.clip_features.encode_image(x)
+        x = x / x.norm(dim=-1, keepdim=True)
+        return self.head.to(x.device)(x.to(torch.float32))
 
 # ----------------------------------------------------------------------------
 # InceptionV3 feature detector.
@@ -131,6 +164,7 @@ metric_specs = {
     'fid':          dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=InceptionV3Detector)),
     'fd_dinov2':    dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=DINOv2Detector)),
     'nima':    dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=Nima)),
+    'ascore':    dnnlib.EasyDict(detector_kwargs=dnnlib.EasyDict(class_name=AestheticPredictor)),
 }
 
 # ----------------------------------------------------------------------------
