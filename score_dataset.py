@@ -79,33 +79,45 @@ def score_dataset(
                                               num_workers=num_workers, prefetch_factor=(prefetch_factor if num_workers > 0 else None))
     device = torch.device('cuda')
     model = get_detector(metric=metric, verbose=True)
-    if checkpoints:
-        os.makedirs(out_path, exist_ok=True)
+    os.makedirs(out_path, exist_ok=True)
     if verbose:
         dist.print0('Scoring Images...')
 
-        # Loop over batches.
-        result = {}
-        for idx, (images, fnames) in tqdm.tqdm(enumerate(data_loader), unit='batch', disable=(dist.get_rank() != 0), total=len(data_loader)):
-            fnames = [os.path.splitext(f)[0].replace(os.sep, '/') for f in fnames]
-            images = torch.as_tensor(images).to(device)
+    # Loop over batches.
+    result = {}
+    for idx, (images, fnames) in tqdm.tqdm(enumerate(data_loader), unit='batch', disable=(dist.get_rank() != 0), total=len(data_loader)):
+        fnames = [os.path.splitext(f)[0].replace(os.sep, '/') for f in fnames]
+        images = torch.as_tensor(images).to(device)
 
-            # Accumulate statistics.
-            if images is not None:
-                scores = model(images).squeeze(1).detach().cpu().tolist()
-                result.update(dict(zip(fnames, scores)))
-                if checkpoints is not None and (idx+1) % checkpoints == 0:
+        # Accumulate statistics.
+        if images is not None:
+            scores = model(images).squeeze(1).detach().cpu().tolist()
+            result.update(dict(zip(fnames, scores)))
+            if checkpoints is not None and (idx+1) % checkpoints == 0:
+
+                if verbose:
                     dist.print0('\nCheckpointing')
-                    gathered = [None for _ in range(dist.get_world_size())]
-                    torch.distributed.all_gather_object(gathered, result)
+                gathered = [None for _ in range(dist.get_world_size())]
+                torch.distributed.all_gather_object(gathered, result)
 
-                    if dist.get_rank() == 0:
-                        merged = {}
-                        for partial in gathered:
-                            merged.update(partial)
-                        pd.Series(merged, name=metric).to_csv(os.path.join(out_path, f'results_{checkpoint_nb}.csv'), header=True, index_label="filename")
-                    result = {}
-                    checkpoint_nb += 1
+                if dist.get_rank() == 0:
+                    merged = {}
+                    for partial in gathered:
+                        merged.update(partial)
+                    pd.Series(merged, name=metric).to_csv(os.path.join(out_path, f'results_{checkpoint_nb}.csv'), header=True, index_label="filename")
+                result = {}
+                checkpoint_nb += 1
+
+    if verbose:
+        dist.print0('\nCheckpointing')
+    gathered = [None for _ in range(dist.get_world_size())]
+    torch.distributed.all_gather_object(gathered, result)
+
+    if dist.get_rank() == 0:
+        merged = {}
+        for partial in gathered:
+            merged.update(partial)
+        pd.Series(merged, name=metric).to_csv(os.path.join(out_path, f'results_{checkpoint_nb}.csv'), header=True, index_label="filename")
 
 
 @click.command()
