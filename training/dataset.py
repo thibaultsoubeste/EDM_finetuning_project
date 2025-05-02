@@ -266,7 +266,7 @@ class ImageFolderDataset(Dataset):
                 image = image.reshape(*image.shape[:2], -1).transpose(2, 0, 1)
             else:
                 try:
-                    image = np.array(PIL.Image.open(f))
+                    image = np.array(PIL.Image.open(f).convert('RGB'))
                 except Exception as e:
                     print0(f"Skipping corrupted file: {fname} ({e})")
                     return np.zeros((self._raw_shape[1:]), dtype=np.uint8)
