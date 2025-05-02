@@ -362,8 +362,8 @@ def calculate_stats_for_files(
     else:
         dataset_obj = dataset.ImageFolderDataset(path=image_path, max_size=num_images, random_seed=seed, resolution=resolution)
 
-    if num_images is not None and len(dataset_obj) < num_images:
-        raise click.ClickException(f'Found {len(dataset_obj)} images, but expected at least {num_images}')
+    # if num_images is not None and len(dataset_obj) < num_images:
+    #     raise click.ClickException(f'Found {len(dataset_obj)} images, but expected at least {num_images}')
     if len(dataset_obj) < 2:
         raise click.ClickException(f'Found {len(dataset_obj)} images, but need at least 2 to compute statistics')
 
