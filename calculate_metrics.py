@@ -65,6 +65,8 @@ class Nima(Detector):
 
         # Adjust dynamic range.
         x = x.to(torch.float32) / 255  # Normalization is directly done in the model
+        x = x - misc.const_like(x, [0.485, 0.456, 0.406]).reshape(1, -1, 1, 1)
+        x = x / misc.const_like(x, [0.229, 0.224, 0.225]).reshape(1, -1, 1, 1)
 
         dist = self.model.to(x.device)(x)
         ratings = torch.arange(1, self.max_score+1, device=dist.device, dtype=dist.dtype)

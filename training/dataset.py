@@ -265,7 +265,11 @@ class ImageFolderDataset(Dataset):
                 image = pyspng.load(f.read())
                 image = image.reshape(*image.shape[:2], -1).transpose(2, 0, 1)
             else:
-                image = np.array(PIL.Image.open(f))
+                try:
+                    image = np.array(PIL.Image.open(f))
+                except Exception as e:
+                    print0(f"Skipping corrupted file: {fname} ({e})")
+                    return np.zeros((self._raw_shape[1:]), dtype=np.uint8)
                 image = image.reshape(*image.shape[:2], -1).transpose(2, 0, 1)
         return image
 
