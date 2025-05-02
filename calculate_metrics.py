@@ -185,6 +185,35 @@ def save_stats(stats, path, verbose=True):
     with open(path, 'wb') as f:
         pickle.dump(stats, f)
 
+
+def save_metrics(result, metrics, out_file, hist):
+    with open(out_file+'.json', 'a+') as f:
+        f.seek(0)
+        try:
+            prev_result = json.load(f)
+        except json.JSONDecodeError:
+            prev_result = {}
+        f.seek(0)
+        f.truncate()
+        for metric in metrics:
+            d = prev_result.get(metric, {})
+            d.update(result['metrics'][metric])
+            prev_result[metric] = d
+        json.dump(prev_result, f)
+
+    pkl_path = out_file + '.pkl'
+    prev_feat = {}
+    if os.path.exists(pkl_path):
+        with open(pkl_path, 'rb') as f:
+            prev_feat = pickle.load(f)
+    prev_feat.update(result['features'])
+    with open(pkl_path, 'wb') as f:
+        pickle.dump(prev_feat, f)
+
+    if hist:
+        for metric in metrics:
+            if metric not in ['fid', 'fd_dinov2']:
+                histogram(result['metrics'][metric], metric, save_file=out_file+'-'+metric)
 # ----------------------------------------------------------------------------
 # Calculate feature statistics for the given image batches
 # in a distributed fashion. Returns an iterable that yields
@@ -470,14 +499,7 @@ def calc(ref_path, metrics, hist, out_file=None, **opts):
     if dist.get_rank() == 0:
         result = calculate_metrics_from_stats(stats=r.stats, ref=ref_path, metrics=metrics)
         if out_file is not None:
-            with open(out_file+'.json', 'w') as f:
-                json.dump(result['metrics'], f)
-            with open(out_file+'.pkl', 'wb') as f:
-                pickle.dump(result['features'], f)
-            if hist:
-                for metric in metrics:
-                    if metric not in ['fid', 'fd_dinov2']:
-                        histogram(result['metrics'][metric], metric, save_file=out_file+'-'+metric)
+            save_metrics(result, metrics, out_file, hist)
     torch.distributed.barrier()
 
 # ----------------------------------------------------------------------------
@@ -506,14 +528,7 @@ def gen(net, ref_path, metrics, num_images, out_file, seed, hist, **opts):
     if dist.get_rank() == 0:
         result = calculate_metrics_from_stats(stats=r.stats, ref=ref_path, metrics=metrics)
         if out_file is not None:
-            with open(out_file+'.json', 'w') as f:
-                json.dump(result['metrics'], f)
-            with open(out_file+'.pkl', 'wb') as f:
-                pickle.dump(result['features'], f)
-            if hist:
-                for metric in metrics:
-                    if metric not in ['fid', 'fd_dinov2']:
-                        histogram(result['metrics'][metric], metric, save_file=out_file)
+            save_metrics(result, metrics, out_file, hist)
     torch.distributed.barrier()
 
 # ----------------------------------------------------------------------------
