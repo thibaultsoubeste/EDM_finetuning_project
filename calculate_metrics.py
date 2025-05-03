@@ -548,14 +548,17 @@ def calc(ref_path, metrics, hist, out_file=None, **opts):
 @click.option('--seed',                     help='Random seed for the first image', metavar='INT',          type=int, default=0, show_default=True)
 @click.option('--batch', 'max_batch_size',  help='Maximum batch size', metavar='INT',                       type=click.IntRange(min=1), default=32, show_default=True)
 @click.option('--out', 'out_file',          help='Output file', metavar='PATH',                             type=str, default=None)
+@click.option('--out-images',               help='Output folder for images', metavar='PATH',                type=str, default=None)
 @click.option('--hist',                     help='Whether we plot the histogram or not', metavar='PATH',    type=bool, is_flag=True)
-def gen(net, ref_path, metrics, num_images, out_file, seed, hist, **opts):
+@click.option('--guidance',                 help='Guidance strength, 1 is no guidance', metavar='FLOAT',    type=float, default=1.0)
+@click.option('--steps', 'num_steps',       help='Number of diffusion steps', metavar='INT',                type=click.IntRange(min=1), default=32)
+def gen(net, ref_path, metrics, num_images, out_file, seed, hist, out_images, **opts):
     """Calculate metrics for a given model using default sampler settings."""
     dist.init()
     if dist.get_rank() == 0:
         for path in ref_path:
             load_stats(path=path)  # do this first, just to prevent generating for nothing, the ref will be reloaded though
-    image_iter = generate_images.generate_images(net=net, seeds=range(seed, seed + num_images), **opts)
+    image_iter = generate_images.generate_images(net=net, seeds=range(seed, seed + num_images), outdir=out_images, **opts)
     stats_iter = calculate_stats_for_iterable(image_iter, metrics=metrics)
     for r in tqdm.tqdm(stats_iter, unit='batch', disable=(dist.get_rank() != 0)):
         pass
